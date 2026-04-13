@@ -22,8 +22,6 @@ from popfinder._visualize import _plot_assignment
 from popfinder._visualize import _plot_training_curve
 from popfinder._visualize import _plot_confusion_matrix
 from popfinder._visualize import _plot_structure
-torch.serialization.add_safe_globals([torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
-torch.serialization.add_safe_globals([popfinder._neural_networks.ClassifierNet])
 
 pd.options.mode.chained_assignment = None
 
@@ -34,7 +32,7 @@ class PopClassifier(object):
     def __init__(self, data, random_state=123, output_folder=None):
 
         self._validate_init_inputs(data, random_state, output_folder)
-
+        torch.serialization.add_safe_globals([popfinder._neural_networks.ClassifierNet, torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
         self.__data = data # GeneticData object
         self.__random_state = random_state
         if output_folder is None:

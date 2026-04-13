@@ -1,8 +1,6 @@
 import torch.nn as nn
 import torch.nn.functional as F
 import torch
-torch.serialization.add_safe_globals([torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
-
 
 class ClassifierNet(nn.Module):
     
