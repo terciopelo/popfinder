@@ -7,8 +7,7 @@ import dill
 import os
 import sys
 torch.serialization.add_safe_globals([torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
-
-
+torch.serialization.add_safe_globals([popfinder._neural_networks.ClassifierNet])
 
 def _generate_train_inputs(data_obj, valid_size, cv_splits, cv_reps, seed=123, bootstrap=False):
 
