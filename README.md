@@ -42,6 +42,8 @@ h5py=1.12.2
 scipy=1.9.3
 ```
 
+With one small tweak to the code for running the training module (add_safe_globals), popfinder can now be used with Python 3.14, and torch 2.11.
+
 ### Using conda
 
 Follow these steps to get started with `conda` and use `conda` to install `popfinder`.
