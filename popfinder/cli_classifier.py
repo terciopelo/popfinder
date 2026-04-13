@@ -2,6 +2,8 @@ import argparse
 import os
 from popfinder.dataloader import GeneticData
 from popfinder.classifier import PopClassifier
+import torch
+torch.serialization.add_safe_globals([torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
 
 def load_classifier(arg_output_folder):
 

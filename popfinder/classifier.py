@@ -22,6 +22,8 @@ from popfinder._visualize import _plot_assignment
 from popfinder._visualize import _plot_training_curve
 from popfinder._visualize import _plot_confusion_matrix
 from popfinder._visualize import _plot_structure
+torch.serialization.add_safe_globals([torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
+
 
 pd.options.mode.chained_assignment = None
 
