@@ -157,6 +157,11 @@ The only required argument for initializing an instance of this class is an inst
 Run the below code to create an instance of the `PopClassifier` class.
 
 ```python
+# These lines deal with recent pyTorch version and security updates
+from popfinder._neural_networks import ClassifierNet
+import torch
+torch.serialization.add_safe_globals([ClassifierNet, torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
+
 classifier = PopClassifier(data_object)
 ```
 
