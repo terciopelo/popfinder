@@ -6,6 +6,114 @@ import numpy as np
 import dill
 import os
 import sys
+import torch.nn as nn
+import pandas as pd
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
+from collections import Counter
+from operator import itemgetter
+
+class GenPropData(Dataset):
+    def __init__(self, length, data_in, row_size):
+        self.length = length
+        self.dataframe = data_in
+        self.row_size = row_size
+        self.pop_order = np.sort(pd.unique(data_in["pop"]))
+        self.pop_num = len(self.pop_order)
+        self.snp_length = len(data_in["alleles"][0])
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        # Get a random subset of the training df
+        glob = self.dataframe
+        for_conv = self.dataframe.sample(n=self.row_size)
+        arr = np.stack(np.array(for_conv["alleles"]))
+        indices = np.lexsort(arr.T[::-1])
+        sorted_arr = arr[indices]
+        row_order = for_conv.index[indices]
+        pop_num = self.pop_num
+        # get props for each set
+        props = []
+        for i in range(pop_num):
+          props.append(for_conv["pop"].to_list().count(self.pop_order[i]))
+        props = np.array(props)/self.row_size
+
+        x = torch.from_numpy(sorted_arr).float().unsqueeze(0) # Random input vector
+        y = torch.from_numpy(props).float() # Label is the sum of elements
+        return x, y
+
+class CNNRegressor(nn.Module):
+    def __init__(self, row_size, snps, kernal_height, kernal_width, out_channels, h_mpool, w_mpool, pop_num, pooling=1):
+        super(CNNRegressor, self).__init__()
+        self.features = nn.Sequential(
+            nn.Conv2d(1, out_channels, kernel_size=(kernal_height,kernal_width), padding=0), # 1 input channel (only one snp layer)
+            nn.ReLU(),
+            nn.AdaptiveMaxPool2d((h_mpool, w_mpool))
+            #nn.MaxPool2d(pooling)
+        )
+        #self.height_end = (((row_size - kernal_height + 1) - pooling ) // pooling) + 1
+        #self.width_end = (((snps - kernal_width + 1) - pooling ) // pooling) + 1
+        self.regressor = nn.Sequential(
+            nn.Flatten(),
+            nn.BatchNorm1d(out_channels * h_mpool * w_mpool),
+            #nn.Linear(out_channels * self.height_end * self.width_end,64), 
+            nn.Linear(out_channels * h_mpool * w_mpool,64),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(64, pop_num), # output number of variables needed for row
+            nn.Softmax(dim=1) # standardize so response totals 1
+        )
+
+    def forward(self, x):
+        x = self.features(x)
+        x = self.regressor(x)
+        return x
+
+def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
+    size = len(dataloader.dataset)
+    # Set the model to training mode - important for batch normalization and dropout layers
+    # Unnecessary in this situation but added for best practices
+    model.train()
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    for batch, (X, y) in enumerate(dataloader):
+        # Compute prediction and loss
+        X, y = X.to(device), y.to(device)
+        pred = model(X)
+        loss = loss_fn(pred, y)
+
+        # Backpropagation
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        if batch % 100 == 0:
+            loss, current = loss.item(), batch * batch_size + len(X)
+            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+
+
+def test_loop(dataloader, model, loss_fn):
+    # Set the model to evaluation mode - important for batch normalization and dropout layers
+    # Unnecessary in this situation but added for best practices
+    model.eval()
+    size = len(dataloader.dataset)
+    num_batches = len(dataloader)
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    test_loss, correct = 0, 0
+
+    # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
+    # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
+    with torch.no_grad():
+        for X, y in dataloader:
+            X, y = X.to(device), y.to(device)
+            pred = model(X)
+            test_loss += loss_fn(pred, y).item()
+            #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
+            correct = torch.mean(torch.nn.functional.pairwise_distance(pred,y, p=2))
+
+    test_loss /= num_batches
+    correct /= size
 
 def _generate_train_inputs(data_obj, valid_size, cv_splits, cv_reps, seed=123, bootstrap=False):
 

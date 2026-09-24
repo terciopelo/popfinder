@@ -10,7 +10,7 @@ import shutil
 from subprocess import call
 import tempfile
 
-import popfinder as pf
+import popfinder
 from popfinder.dataloader import GeneticData
 from popfinder._neural_networks import ClassifierNet
 from popfinder._helper import _generate_train_inputs
@@ -25,7 +25,7 @@ from popfinder._visualize import _plot_structure
 
 pd.options.mode.chained_assignment = None
 
-class PopClassifier(object):
+class CnnMixer(object):
     """
     A class to represent a classifier neural network object for population assignment.
     """
@@ -261,7 +261,7 @@ class PopClassifier(object):
                 self.save(save_path=tempfolder)
 
                 # Find path to _mp_training
-                filepath = pf.__file__
+                filepath = popfinder.__file__
                 folderpath = os.path.dirname(filepath)
 
                 # Instead of looping through bootstrap iteration, run in parallel
