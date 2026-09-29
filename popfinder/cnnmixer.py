@@ -31,9 +31,11 @@ class CnnMixer(object):
         from popfinder._neural_networks import ClassifierNet
         torch.serialization.add_safe_globals([popfinder._neural_networks.ClassifierNet, torch.nn.Linear, torch.nn.BatchNorm1d, torch.nn.Dropout])
         self.__data = data # GeneticData object
+        self.__train_set = data.train
+        self.__test_set = data.test
         self.__random_state = random_state
         if output_folder is None:
-            output_folder = os.path.join(os.getcwd(), "popfinder_results")
+            output_folder = os.path.join(os.getcwd(), "cnnmixer_results")
         self.__output_folder = output_folder
         self.__label_enc = data.label_enc
         self.__train_history = None
@@ -50,10 +52,15 @@ class CnnMixer(object):
         self.__mp_run = False
         self.__lowest_val_loss_total = 9999
         self.__optimizer = None
+        self.__row_size = 24
 
     @property
     def data(self):
         return self.__data
+    
+    @property
+    def train_set(self):
+      return self.__train_set
 
     @property
     def random_state(self):
@@ -138,7 +145,7 @@ class CnnMixer(object):
               epochs=100, jobs=1, overwrite_results=False, 
               **hyperparams):
         """
-        Trains the classification neural network.
+        Trains the regressor CNN to identify pop proprotions
 
         Parameters
         ----------
@@ -205,98 +212,35 @@ class CnnMixer(object):
             nreps = nrep_begin + nreps 
 
         hyperparams = {k: v for k, v in hyperparams.items() if v is not None}
+        
+        part_80 = self.__train_set.sample(frac = 0.80)
+        remainder_10 = self.__train_set.drop(part_80.index)
+        
+        train_dataset = GenPropData(length=10000, data_in = part_80, row_size = self.__row_size)
+        valid_dataset = GenPropData(length=10000, data_in = remainder_10, row_size = self.__row_size)
+        
+        train_loader = DataLoader(train_dataset, batch_size=32, num_workers=1)
+        valid_loader = DataLoader(valid_dataset, batch_size=32, num_workers=1)
+        
+        # setup for running CNN on graphics card (or CPU, if not avail)
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length, 
+            kernal_height=5, kernal_width=5, out_channels=16, pooling=4, 
+            pop_num = train_dataset.pop_num, h_mpool=1, w_mpool=50000).to(device)
+        
+        loss_fn = nn.MSELoss() # also calculate R2?
+        learning_rate = 1e-2
+        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        
+        batch_size = 32
+        epochs = 100
+        for t in range(epochs):
+          print(f"Epoch {t+1}\n-------------------------------")
+          train_loop(train_loader, model, loss_fn, optimizer, batch_size)
+          test_loop(valid_loader, model, loss_fn)
 
-        # Create optimizer
-        self.__store_optimizer_params(optimizer, learning_rate, hyperparams)
-
-        multi_output = (bootstraps is not None) or (nreps is not None)
-
-        if multi_output:
-
-            if bootstraps is None:
-                bootstraps = 1
-            if nreps is None:
-                nreps = nrep_begin + 1
-
-            loss_df = pd.DataFrame()
-
-            if jobs == 1:
-                for i in range(bootstraps):
-                    for j in range(nrep_begin, nreps):
-                        #TODO: how does this affect mp results
-                        if not self.__mp_run:
-                            boot_folder = os.path.join(self.output_folder, 
-                                                       f"rep{j+1}_boot{i+1}")
-                            if not os.path.exists(boot_folder):
-                                os.makedirs(boot_folder)
-                        else:
-                            boot_folder = self.output_folder
-
-                        inputs = _generate_train_inputs(
-                            self.data, valid_size, cv_splits, nreps, 
-                            seed=self.random_state, bootstrap=True)
-                        
-                        boot_loss_df = self.__train_on_inputs(
-                            inputs=inputs, cv_splits=cv_splits, epochs=epochs, 
-                            learning_rate=learning_rate, batch_size=int(batch_size), 
-                            dropout_prop=dropout_prop, hidden_size=hidden_size, 
-                            hidden_layers=hidden_layers, 
-                            result_folder=boot_folder, patience=patience, 
-                            min_delta=min_delta, overwrite_results=overwrite_results)
-                        
-                        boot_loss_df.to_csv(os.path.join(boot_folder, "loss.csv"), index=False)
-                        boot_loss_df["rep"] = j + 1
-                        boot_loss_df["bootstrap"] = i + 1
-                        loss_df = pd.concat([loss_df, boot_loss_df], axis=0, ignore_index=True)
-            elif jobs > 1:
-                # Create tempfolder
-                tempfolder = os.path.join(self.output_folder, "temp")
-
-                # Let popfinder know this is a multiprocessing run (affects output folder creation)
-                self.__mp_run = True
-                self.save(save_path=tempfolder)
-
-                # Find path to _mp_training
-                filepath = popfinder.__file__
-                folderpath = os.path.dirname(filepath)
-
-                # Instead of looping through bootstrap iteration, run in parallel
-                # to speed up training
-                call(["python", folderpath + "/_mp_training.py", "--path", tempfolder,
-                    "--validsize", str(valid_size), "--cvsplits", str(cv_splits),
-                    "--repstart", str(nrep_begin), "--nreps", str(nreps),
-                    "--nboots", str(bootstraps), "--patience", str(patience),
-                    "--mindelta", str(min_delta), "--learningrate", str(learning_rate),
-                    "--batchsize", str(int(batch_size)), "--dropout", str(dropout_prop),
-                    "--hiddensize", str(hidden_size), "--hiddenlayers", str(hidden_layers),
-                    "--epochs", str(epochs), "--jobs", str(jobs)])
-                
-                loss_df = pd.read_csv(os.path.join(tempfolder, "train_history.csv"))
-
-        # Save training history
-        if self.__train_history is None:
-            self.__train_history = loss_df
-        else:
-            self.__train_history = pd.concat([self.__train_history, loss_df], ignore_index=True)
-       
-       # Determine best model
-        if (jobs == 1) or (not multi_output):
-            best_model_path = os.path.join(self.output_folder, "best_model.pt")
-            
-            if os.path.exists(best_model_path):
-                self.__best_model = torch.load(os.path.join(self.output_folder, "best_model.pt"))
-            
-        else:
-            best_model_folder, min_split = self.__find_best_model_folder_from_mp()
-
-            if best_model_folder is not None:
-                best_model_path = os.path.join(best_model_folder, f"best_model_split{min_split}.pt")
-
-                if os.path.exists(best_model_path):
-                    self.__best_model = torch.load(os.path.join(best_model_folder, f"best_model_split{min_split}.pt"))
-                    torch.save(self.__best_model, os.path.join(self.output_folder, "best_model.pt"))
-
-            self.__clean_mp_folders(nrep_begin, nreps, bootstraps)
+        print("Done!")
+        torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
 
 
     def test(self, use_best_model=True, ensemble_accuracy_threshold=0.5, save=True):
@@ -320,14 +264,9 @@ class CnnMixer(object):
         -------
         None.
         """
-        # Find unique reps/splits from cross validation
-        reps = self.train_history["rep"].unique()
-        splits = self.train_history["split"].unique()
-
-        if "bootstrap" in self.train_history.columns:
-            bootstraps = self.train_history["bootstrap"].unique()
-        else:
-            bootstraps = None
+        
+        
+        test_loop(test_loader,model,loss_fn)
         
         test_input = self.data.test
 

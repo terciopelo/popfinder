@@ -20,7 +20,7 @@ class GenPropData(Dataset):
         self.row_size = row_size
         self.pop_order = np.sort(pd.unique(data_in["pop"]))
         self.pop_num = len(self.pop_order)
-        self.snp_length = len(data_in["alleles"][0])
+        self.snp_length = len(data_in["alleles"])
 
     def __len__(self):
         return self.length
@@ -73,8 +73,6 @@ class CNNRegressor(nn.Module):
 
 def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
     size = len(dataloader.dataset)
-    # Set the model to training mode - important for batch normalization and dropout layers
-    # Unnecessary in this situation but added for best practices
     model.train()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     for batch, (X, y) in enumerate(dataloader):
@@ -92,18 +90,13 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
             loss, current = loss.item(), batch * batch_size + len(X)
             print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
 
-
 def test_loop(dataloader, model, loss_fn):
-    # Set the model to evaluation mode - important for batch normalization and dropout layers
-    # Unnecessary in this situation but added for best practices
     model.eval()
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     test_loss, correct = 0, 0
 
-    # Evaluating the model with torch.no_grad() ensures that no gradients are computed during test mode
-    # also serves to reduce unnecessary gradient computations and memory usage for tensors with requires_grad=True
     with torch.no_grad():
         for X, y in dataloader:
             X, y = X.to(device), y.to(device)
