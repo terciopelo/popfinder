@@ -78,7 +78,15 @@ class CnnMixer(object):
     @property
     def label_enc(self):
         return self.__label_enc
-
+    
+    @property
+    def row_size(self):
+        return self.__row_size
+    
+    @row_size.setter
+    def row_size(self, value):
+        self.__row_size=value
+    
     @label_enc.setter
     def label_enc(self, value):
         self.__label_enc = value
@@ -139,7 +147,7 @@ class CnnMixer(object):
     def optimizer(self, value):
         self.__optimizer = value
 
-    def train(self, valid_size=0.2, cv_splits=1, nreps=1, bootstraps=None,
+    def train(self, valid_size=0.2, row_size=24, nreps=1, bootstraps=None,
               patience=None, min_delta=0, learning_rate=0.001, batch_size=16, 
               dropout_prop=0, hidden_size=16, hidden_layers=1, optimizer="Adam",
               epochs=100, jobs=1, overwrite_results=False, 
@@ -151,9 +159,8 @@ class CnnMixer(object):
         ----------
         valid_size : float, optional
             Proportion of data to use for validation. The default is 0.2.
-        cv_splits : int, optional
-            Number of cross-validation splits. If set to 1, then no cross-
-            validation is applied. The default is 1.
+        row_size : int, optional
+            Row size used for CNN 2D matrices
         nreps : int, optional
             Number of repetitions. The default is 1.
         bootstraps : int, optional
@@ -196,11 +203,17 @@ class CnnMixer(object):
         -------
         None.
         """
-        self._validate_train_inputs(epochs, valid_size, cv_splits, nreps,
+        # run some checks on the parameters used for training
+        # need to remove/update some of these
+        self._validate_train_inputs(epochs, valid_size, row_size, nreps,
                                     learning_rate, batch_size, dropout_prop)
+                                    
+        # since row size is needed for testing as well, update the object's global
+        self.__row_size = row_size
         
+        # need to update folder setup (one folder vs bootstrapped)
+        # remove nreps setup?
         self.__prepare_result_folder(self.output_folder, overwrite_results)
-
         files = os.listdir(self.output_folder)
         if (overwrite_results) or (len(files) == 0) or (self.train_history is None):
             nrep_begin = 0
@@ -209,16 +222,21 @@ class CnnMixer(object):
         else:
             existing_reps = [int(f.split("_")[-2].replace("rep", "")) for f in files if "rep" in f]
             nrep_begin = max(existing_reps)
-            nreps = nrep_begin + nreps 
+            nreps = nrep_begin + nreps
 
+        # update hyperparams to match new optimizer?
         hyperparams = {k: v for k, v in hyperparams.items() if v is not None}
         
-        part_80 = self.__train_set.sample(frac = 0.80)
+        # generate train/validation set for this particular training run
+        part_80 = self.__train_set.sample(frac = (1-valid_size))
         remainder_10 = self.__train_set.drop(part_80.index)
         
-        train_dataset = GenPropData(length=10000, data_in = part_80, row_size = self.__row_size)
-        valid_dataset = GenPropData(length=10000, data_in = remainder_10, row_size = self.__row_size)
+        # build data set to pass into training
+        train_dataset = GenPropData(length=10000, data_in = part_80, row_size = row_size)
+        valid_dataset = GenPropData(length=10000, data_in = remainder_10, row_size = row_size)
         
+        # build loaders for training
+        # make num workers user settable?
         train_loader = DataLoader(train_dataset, batch_size=32, num_workers=1)
         valid_loader = DataLoader(valid_dataset, batch_size=32, num_workers=1)
         
@@ -228,20 +246,22 @@ class CnnMixer(object):
             kernal_height=5, kernal_width=5, out_channels=16, pooling=4, 
             pop_num = train_dataset.pop_num, h_mpool=1, w_mpool=50000).to(device)
         
+        # set loss function, some optimzer setup
+        # make these user-adjustable?
         loss_fn = nn.MSELoss() # also calculate R2?
         learning_rate = 1e-2
         optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
         
+        # set batch size and training epochs
+        # need to make this user adjustable
         batch_size = 32
         epochs = 100
         for t in range(epochs):
           print(f"Epoch {t+1}\n-------------------------------")
           train_loop(train_loader, model, loss_fn, optimizer, batch_size)
           test_loop(valid_loader, model, loss_fn)
-
         print("Done!")
         torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
-
 
     def test(self, use_best_model=True, ensemble_accuracy_threshold=0.5, save=True):
         """
@@ -265,20 +285,15 @@ class CnnMixer(object):
         None.
         """
         
+        # build testing data set / loader
+        test_dataset = GenPropData(length=100, data_in = self.data.test, row_size = 24)
+        test_loader = DataLoader(test_dataset, batch_size=32, num_workers=1)
         
+        # run test loop
         test_loop(test_loader,model,loss_fn)
         
-        test_input = self.data.test
-
-        X_test = test_input["alleles"]
-        y_test = test_input["pop"]
-
-        y_test = self.label_enc.transform(y_test)
-        X_test, y_test = _data_converter(X_test, y_test)
-
-        y_true = y_test.squeeze()
-        y_true_pops = self.label_enc.inverse_transform(y_true)
-
+        # incorporate this in once everything is working?
+        """
         # If not using just the best model, then test using all models
         if not use_best_model:
             if bootstraps is None: 
@@ -307,7 +322,7 @@ class CnnMixer(object):
                                     "classifier_test_results.csv"), index=False)
 
         self.__calculate_performance(y_true, y_pred, y_true_pops, use_best_model, bootstraps)
-
+        """
     def assign_unknown(self, use_best_model=True, ensemble_accuracy_threshold=0.5, save=True):
         """
         Assigns unknown samples to populations using the trained neural network.
@@ -604,23 +619,6 @@ class CnnMixer(object):
         _plot_training_curve(self.train_history, self.__nn_type,
             self.output_folder, save, facet_by_split_rep, y_axis_zero)
 
-    def plot_confusion_matrix(self, save=True):
-        """
-        Plots the confusion matrix based on the results from running the test() 
-        function.
-        
-        Parameters
-        ----------
-        save : bool, optional
-            Whether to save the plot to a png file. The default is True.
-        
-        Returns
-        -------
-        None
-        """
-        _plot_confusion_matrix(self.test_results, self.confusion_matrix,
-            self.nn_type, self.output_folder, save)
-
     def plot_assignment(self, save=True, col_scheme="Spectral"):
         """
         Plots the results from running the assign_unknown() function. If the 
@@ -680,7 +678,7 @@ class CnnMixer(object):
 
         _plot_structure(preds, col_scheme, self.__nn_type, folder, save)
 
-    def save(self, save_path=None, filename="classifier.pkl"):
+    def save(self, save_path=None, filename="mixer.pkl"):
         """
         Saves the current instance of the class to a pickle file.
 
@@ -725,7 +723,7 @@ class CnnMixer(object):
             if not isinstance(output_folder, str):
                 raise TypeError("output_folder must be a string")
 
-    def _validate_train_inputs(self, epochs, valid_size, cv_splits, nreps,
+    def _validate_train_inputs(self, epochs, valid_size, row_size, nreps,
                                learning_rate, batch_size, dropout_prop):
 
         if not isinstance(epochs, (int, float, complex)):
@@ -739,13 +737,6 @@ class CnnMixer(object):
 
         if valid_size > 1 or valid_size < 0:
             raise ValueError("valid_size must be between 0 and 1")
-        
-        if not isinstance(cv_splits, int):
-            raise TypeError("cv_splits must be an integer")
-        
-        if cv_splits < 1:
-            raise ValueError("cv_splits must be greater than 0")
-
         if not isinstance(nreps, int):
             raise TypeError("nreps must be an integer")
         
@@ -771,8 +762,8 @@ class CnnMixer(object):
             raise ValueError("dropout_prop must be between 0 and 1")
 
         # Validate that the number of CV splits is not less than the smallest pop size
-        if cv_splits > min(self.data.train["pop"].value_counts()):
-            raise ValueError("cv_splits cannot be greater than the smallest population size")
+        if row_size > min(self.data.train["pop"].value_counts())*(1-valid_size):
+            raise ValueError("Row size cannot be greater than the minimum population size in the training data set (otherwise a 0 fraction for that population will be impossible)")
 
     # Hidden functions below   
     def __train_on_inputs(self, inputs, cv_splits, epochs, learning_rate, batch_size, 

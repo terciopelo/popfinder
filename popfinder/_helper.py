@@ -40,8 +40,8 @@ class GenPropData(Dataset):
           props.append(for_conv["pop"].to_list().count(self.pop_order[i]))
         props = np.array(props)/self.row_size
 
-        x = torch.from_numpy(sorted_arr).float().unsqueeze(0) # Random input vector
-        y = torch.from_numpy(props).float() # Label is the sum of elements
+        x = torch.from_numpy(sorted_arr).float().unsqueeze(0)
+        y = torch.from_numpy(props).float()
         return x, y
 
 class CNNRegressor(nn.Module):
@@ -89,6 +89,7 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
         if batch % 100 == 0:
             loss, current = loss.item(), batch * batch_size + len(X)
             print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+    return loss
 
 def test_loop(dataloader, model, loss_fn):
     model.eval()
@@ -104,9 +105,9 @@ def test_loop(dataloader, model, loss_fn):
             test_loss += loss_fn(pred, y).item()
             #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
             correct = torch.mean(torch.nn.functional.pairwise_distance(pred,y, p=2))
-
     test_loss /= num_batches
     correct /= size
+    return correct,test_loss
 
 def _generate_train_inputs(data_obj, valid_size, cv_splits, cv_reps, seed=123, bootstrap=False):
 
