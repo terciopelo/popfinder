@@ -166,9 +166,9 @@ class CnnMixer(object):
         return self.__test_log
 
     def train(self, valid_size=0.2, row_size=24, nreps=1, bootstraps=None,
-              patience=None, min_delta=0, learning_rate=0.001, batch_size=16, 
+              patience=None, min_delta=0, learning_rate=0.001, batch_size=32, 
               dropout_prop=0, hidden_size=16, hidden_layers=1, optimizer="Adam",
-              epochs=100, jobs=1, overwrite_results=False, num_workers=1,boot=False,
+              epochs=100, jobs=1, overwrite_results=False, num_workers=1,boot=False, boot_num =0,
               **hyperparams):
         """
         Trains the regressor CNN to identify pop proprotions
@@ -192,7 +192,7 @@ class CnnMixer(object):
         learning_rate : float, optional
             Learning rate for the neural network. The default is 0.001.
         batch_size : int, optional
-            Batch size for the neural network. The default is 16.
+            Batch size for the neural network. The default is 32.
         dropout_prop : float, optional
             Dropout proportion for the neural network. The default is 0.
         hidden_size : int, optional
@@ -214,6 +214,8 @@ class CnnMixer(object):
             Determines number of worker threads used for loading batches. Maybe set to 4 per GPU?
         boot : boolean, optional
             Boolean that informs the function if this is a bootstrap run (or not)
+        boot_num : int, optional
+            Integer indicating which boot run is being conducted (for train/valid data set)
         **hyperparams : optional
             Additional hyperparameters for the optimizer. For Adam, can include
             beta1, beta2, weight_decay, and epsilon. For SGD, can include 
@@ -286,12 +288,12 @@ class CnnMixer(object):
           train_loss = train_loop(train_loader, model, loss_fn, optimizer, batch_size)
           valid_cor, valid_loss, valid_r2,valid_rmse = test_loop(valid_loader, model, loss_fn)
           loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse))
-          if boot:
-              self.__valid_log = pd.concat([self.__valid_log, {"train_loss": [train_loss],"valid_correst": [valid_cor],
-                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse]}], ignore_index=True)
+          if t > 0:
+              self.__valid_log = pd.concat([self.__valid_log, {"train_loss": [train_loss],"valid_correst": [valid_cor.cpu()],
+                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]}], ignore_index=True)
           else:
-              self.__valid_log = pd.DataFrame({"train_loss": [train_loss],"valid_correct": [valid_cor],
-                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse]}) 
+              self.__valid_log = pd.DataFrame({"train_loss": [train_loss],"valid_correct": [valid_cor.cpu()],
+                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]}) 
         print("Done!")
         torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
         

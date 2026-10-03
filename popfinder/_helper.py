@@ -108,10 +108,10 @@ def test_loop(dataloader, model, loss_fn):
             correct = torch.mean(torch.nn.functional.pairwise_distance(pred,y, p=2))
             # also do root-mean-squared error and r2; note pred/y are flipped for these functions
             rsq = r2_score(y.cpu(),pred.cpu()) 
-            mse = root_mean_squared_error(y.cpu(),pred.cpu()) 
+            rmse = root_mean_squared_error(y.cpu(),pred.cpu()) 
     test_loss /= num_batches
     correct /= size
-    return correct, test_loss,rsq,root_mean_squared_error
+    return correct, test_loss,rsq,rmse
 
 def _generate_train_inputs(data_obj, valid_size, cv_splits, cv_reps, seed=123, bootstrap=False):
 
