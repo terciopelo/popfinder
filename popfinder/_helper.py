@@ -12,6 +12,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from collections import Counter
 from operator import itemgetter
+from sklearn.metrics import r2_score, root_mean_squared_error
 
 class GenPropData(Dataset):
     def __init__(self, length, data_in, row_size):
@@ -105,9 +106,12 @@ def test_loop(dataloader, model, loss_fn):
             test_loss += loss_fn(pred, y).item()
             #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
             correct = torch.mean(torch.nn.functional.pairwise_distance(pred,y, p=2))
+            # also do root-mean-squared error and r2; note pred/y are flipped for these functions
+            rsq = r2_score(y,pred) 
+            mse = root_mean_squared_error(y,pred) 
     test_loss /= num_batches
     correct /= size
-    return correct,test_loss
+    return correct, test_loss,rsq,root_mean_squared_error
 
 def _generate_train_inputs(data_obj, valid_size, cv_splits, cv_reps, seed=123, bootstrap=False):
 

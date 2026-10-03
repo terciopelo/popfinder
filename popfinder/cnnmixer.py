@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, matthews_corrcoef
+from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.preprocessing import OneHotEncoder
 from collections import Counter
 import numpy as np
@@ -53,6 +54,9 @@ class CnnMixer(object):
         self.__lowest_val_loss_total = 9999
         self.__optimizer = None
         self.__row_size = 24
+        self.__boots = 0
+        self.__test_log = None
+        self.__valid_log = None
 
     @property
     def data(self):
@@ -146,11 +150,23 @@ class CnnMixer(object):
     @optimizer.setter
     def optimizer(self, value):
         self.__optimizer = value
+    
+    @property
+    def boots(self):
+        return self.__boots
+        
+    @property
+    def valid_log(self):
+        return self.__valid_log
+    
+    @property
+    def test_log(self):
+        return self.__test_log
 
     def train(self, valid_size=0.2, row_size=24, nreps=1, bootstraps=None,
               patience=None, min_delta=0, learning_rate=0.001, batch_size=16, 
               dropout_prop=0, hidden_size=16, hidden_layers=1, optimizer="Adam",
-              epochs=100, jobs=1, overwrite_results=False, 
+              epochs=100, jobs=1, overwrite_results=False, num_workers=1,boot=False,
               **hyperparams):
         """
         Trains the regressor CNN to identify pop proprotions
@@ -192,6 +208,10 @@ class CnnMixer(object):
         overwrite_results : boolean, optional
             If True, then will clear the output folder before training the new 
             model. The default is True.
+        num_workers : int, optional
+            Determines number of worker threads used for loading batches. Maybe set to 4 per GPU?
+        boot : boolean, optional
+            Boolean that informs the function if this is a bootstrap run (or not)
         **hyperparams : optional
             Additional hyperparameters for the optimizer. For Adam, can include
             beta1, beta2, weight_decay, and epsilon. For SGD, can include 
@@ -248,7 +268,7 @@ class CnnMixer(object):
         
         # set loss function, some optimzer setup
         # make these user-adjustable?
-        loss_fn = nn.MSELoss() # also calculate R2?
+        loss_fn = nn.MSELoss()
         learning_rate = 1e-2
         optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
         
@@ -256,14 +276,23 @@ class CnnMixer(object):
         # need to make this user adjustable
         batch_size = 32
         epochs = 100
+        loss_list = []
         for t in range(epochs):
           print(f"Epoch {t+1}\n-------------------------------")
-          train_loop(train_loader, model, loss_fn, optimizer, batch_size)
-          test_loop(valid_loader, model, loss_fn)
+          train_loss = train_loop(train_loader, model, loss_fn, optimizer, batch_size)
+          valid_cor, valid_loss, valid_r2,valid_rmse = test_loop(valid_loader, model, loss_fn)
+          loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse))
+          if boot:
+              self.__valid_log = pd.concat([self.__valid_log, {"train_loss": [train_loss],"valid_correst": [valid_cor],
+                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse]}], ignore_index=True)
+          else:
+              self.__valid_log = pd.Dataframe("train_loss": [train_loss],"valid_correct": [valid_cor],
+                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse]}) 
         print("Done!")
         torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
+        
 
-    def test(self, use_best_model=True, ensemble_accuracy_threshold=0.5, save=True):
+    def test(self, use_best_model=True, ensemble_accuracy_threshold=0.5, save=True, boot=False):
         """
         Tests the classification neural network.
 
@@ -272,11 +301,7 @@ class CnnMixer(object):
         use_best_model : bool, optional
             Whether to test using the best model only. If set to False, then will use all
             models generated from all training repeats and cross-validation splits and
-            provide an ensemble frequency of assignments. The default is True.   
-        ensemble_accuracy_threshold : float, optional
-            The threshold for the ensemble accuracy. If the training accuracy of a model 
-            in the ensemble is below this threshold, then the model will not be used in 
-            the test. The default is 0.5.     
+            provide an ensemble frequency of assignments. The default is True.        
         save : bool, optional
             Whether to save the test results to the output folder. The default is True.
         
@@ -290,7 +315,14 @@ class CnnMixer(object):
         test_loader = DataLoader(test_dataset, batch_size=32, num_workers=1)
         
         # run test loop
-        test_loop(test_loader,model,loss_fn)
+        correct_tl, loss_tl, rsq_tl, rmse_tl = test_loop(test_loader,model,loss_fn)
+        
+        if boot:
+            self.__test_log = pd.concat([self.__test_log, {"test_correst": [correct_tl],
+                "test_loss": [loss_tl], "test_r2":[rsq_tl], "test_rmse" : [rmse_tl]}], ignore_index=True)
+        else:
+            self.__test_log = pd.Dataframe("test_correst": [correct_tl],
+                "test_loss": [loss_tl], "test_r2":[rsq_tl], "test_rmse" : [rmse_tl]})
         
         # incorporate this in once everything is working?
         """
