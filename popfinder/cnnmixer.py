@@ -19,6 +19,7 @@ from popfinder._visualize import _plot_assignment
 from popfinder._visualize import _plot_training_curve
 from popfinder._visualize import _plot_confusion_matrix
 from popfinder._visualize import _plot_structure
+from popfinder._helper import _save, _load
 
 pd.options.mode.chained_assignment = None
 
@@ -289,10 +290,10 @@ class CnnMixer(object):
           valid_cor, valid_loss, valid_r2,valid_rmse = test_loop(valid_loader, model, loss_fn)
           loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse))
           if t > 0:
-              self.__valid_log = pd.concat([self.__valid_log, {"train_loss": [train_loss],"valid_correst": [valid_cor.cpu()],
-                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]}], ignore_index=True)
+              self.__valid_log = pd.concat([self.__valid_log, pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
+                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]})], ignore_index=True)
           else:
-              self.__valid_log = pd.DataFrame({"train_loss": [train_loss],"valid_correct": [valid_cor.cpu()],
+              self.__valid_log = pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
                   "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]}) 
         print("Done!")
         torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
