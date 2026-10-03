@@ -107,8 +107,8 @@ def test_loop(dataloader, model, loss_fn):
             #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
             correct = torch.mean(torch.nn.functional.pairwise_distance(pred,y, p=2))
             # also do root-mean-squared error and r2; note pred/y are flipped for these functions
-            rsq = r2_score(y,pred) 
-            mse = root_mean_squared_error(y,pred) 
+            rsq = r2_score(y.cpu(),pred.cpu()) 
+            mse = root_mean_squared_error(y.cpu(),pred.cpu()) 
     test_loss /= num_batches
     correct /= size
     return correct, test_loss,rsq,root_mean_squared_error

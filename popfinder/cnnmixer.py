@@ -57,6 +57,8 @@ class CnnMixer(object):
         self.__boots = 0
         self.__test_log = None
         self.__valid_log = None
+        self.__model = None
+        self.__loss_fn = None
 
     @property
     def data(self):
@@ -265,17 +267,19 @@ class CnnMixer(object):
         model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length, 
             kernal_height=5, kernal_width=5, out_channels=16, pooling=4, 
             pop_num = train_dataset.pop_num, h_mpool=1, w_mpool=50000).to(device)
+        self.__model = model
         
         # set loss function, some optimzer setup
         # make these user-adjustable?
         loss_fn = nn.MSELoss()
+        self.__loss_fn = loss_fn
         learning_rate = 1e-2
         optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
         
         # set batch size and training epochs
         # need to make this user adjustable
         batch_size = 32
-        epochs = 100
+        epochs = epochs
         loss_list = []
         for t in range(epochs):
           print(f"Epoch {t+1}\n-------------------------------")
@@ -286,7 +290,7 @@ class CnnMixer(object):
               self.__valid_log = pd.concat([self.__valid_log, {"train_loss": [train_loss],"valid_correst": [valid_cor],
                   "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse]}], ignore_index=True)
           else:
-              self.__valid_log = pd.Dataframe("train_loss": [train_loss],"valid_correct": [valid_cor],
+              self.__valid_log = pd.DataFrame({"train_loss": [train_loss],"valid_correct": [valid_cor],
                   "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse]}) 
         print("Done!")
         torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
@@ -314,6 +318,8 @@ class CnnMixer(object):
         test_dataset = GenPropData(length=100, data_in = self.data.test, row_size = 24)
         test_loader = DataLoader(test_dataset, batch_size=32, num_workers=1)
         
+        model = self.__model
+        loss_fn = self.__loss_fn
         # run test loop
         correct_tl, loss_tl, rsq_tl, rmse_tl = test_loop(test_loader,model,loss_fn)
         
@@ -321,7 +327,7 @@ class CnnMixer(object):
             self.__test_log = pd.concat([self.__test_log, {"test_correst": [correct_tl],
                 "test_loss": [loss_tl], "test_r2":[rsq_tl], "test_rmse" : [rmse_tl]}], ignore_index=True)
         else:
-            self.__test_log = pd.Dataframe("test_correst": [correct_tl],
+            self.__test_log = pd.DataFrame({"test_correst": [correct_tl],
                 "test_loss": [loss_tl], "test_r2":[rsq_tl], "test_rmse" : [rmse_tl]})
         
         # incorporate this in once everything is working?
