@@ -3,6 +3,7 @@ import pandas as pd
 import allel # change to sgkit eventually
 import sys
 import os
+from popfinder.discern2 import *
 
 from sklearn.model_selection import RepeatedStratifiedKFold, train_test_split
 from sklearn.preprocessing import LabelEncoder
@@ -277,6 +278,12 @@ class GeneticData():
         # Reset unknowns and full data
         _, self.unknowns = self.split_unknowns(locs)
         self.data = pd.concat([self.knowns, self.unknowns], ignore_index=True)
+
+    def discern(self,method="cq"):
+        """
+        Runs a population discernability analysis
+        """
+        
 
     def _initialize(self, test_size, test_samples, exclude_pops, filter_high_fst_snps, seed):
 

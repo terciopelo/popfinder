@@ -21,7 +21,7 @@ class GenPropData(Dataset):
         self.row_size = row_size
         self.pop_order = np.sort(pd.unique(data_in["pop"]))
         self.pop_num = len(self.pop_order)
-        self.snp_length = len(data_in["alleles"])
+        self.snp_length = len(data_in["alleles"].iloc[0])
 
     def __len__(self):
         return self.length
@@ -71,6 +71,29 @@ class CNNRegressor(nn.Module):
         x = self.features(x)
         x = self.regressor(x)
         return x
+
+class permutation_invar_nn(nn.Module):
+    def __init__(self, num_cols, hidden_size, output_size):
+        super().__init__()
+        self.hidden_layer = nn.Linear(in_features=num_cols, out_features=hidden_size)
+        self.relu = nn.ReLU()
+        self.output_layer = nn.Linear(in_features=hidden_size, out_features=output_size)
+
+    def forward(self, x):
+        col_means = torch.mean(x, dim=2, keepdim=True)
+        col_means = col_means.squeeze(1)
+        
+        #print(col_means.shape)
+        
+        out = self.hidden_layer(col_means)
+        
+        #print(out.shape)
+        out = self.relu(out)
+        out = self.output_layer(out)
+        out = out.squeeze()
+        #print(out.shape)
+
+        return out
 
 def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
     size = len(dataloader.dataset)
