@@ -15,31 +15,108 @@ from operator import itemgetter
 from sklearn.metrics import r2_score, root_mean_squared_error
 
 class GenPropData(Dataset):
-    def __init__(self, length, data_in, row_size):
+    # Note: add option to return to old genprop data loader for 
+    # data sets where sample proportions match field props?
+    def __init__(self, length, data_in, row_size, zero_inflation_prob=0.1):
         self.length = length
         self.dataframe = data_in
+       
+        # do some handling on pop names to create a mapping (torch doesn't support
+        # string, so need integer class mapping) 
+        categorical_series = data_in["pop"].astype('category')
+        self.pop_names = categorical_series.cat.categories.tolist()
+        self.pop_num = len(self.pop_names)
+        integer_labels = categorical_series.cat.codes.values
+        self.unique_pops = list(range(self.pop_num))
+        self.pop_to_indices = {
+            pop_code: torch.tensor(np.where(integer_labels == pop_code)[0], dtype=torch.long)
+            for pop_code in self.unique_pops
+        }
+        
         self.row_size = row_size
         self.pop_order = np.sort(pd.unique(data_in["pop"]))
-        self.pop_num = len(self.pop_order)
+        #self.unique_pops = pd.unique(data_in["pop"]).tolist()
         self.snp_length = len(data_in["alleles"].iloc[0])
+        self.zero_inflation_prob = zero_inflation_prob
+        #self.pop_to_indices = {
+        #    pop: torch.tensor(data_in.index[data_in["pop"] == pop].tolist(), dtype=torch.long)
+        #    for pop in self.unique_pops
+        #}
+        self.unique_pops = list(range(self.pop_num))
+        self.pop_to_indices = {
+            pop_code: torch.tensor(np.where(integer_labels == pop_code)[0], dtype=torch.long)
+            for pop_code in self.unique_pops
+        }
 
     def __len__(self):
         return self.length
 
     def __getitem__(self, idx):
-        # Get a random subset of the training df
-        glob = self.dataframe
-        for_conv = self.dataframe.sample(n=self.row_size)
-        arr = np.stack(np.array(for_conv["alleles"]))
+        # inflate zeroes by randomly dropping some pops
+        # then use a random 0>x<1 distro within a pop if it is included 
+        # use combinaton of this + direchlet to get a random proportion set (not just
+        # a random sample of n rows)
+        # "zero-inflated direchlet"
+        
+        active_mask = np.random.rand(self.pop_num) > self.zero_inflation_prob
+        
+        # ensure not all pops are 0!
+        if not np.any(active_mask):
+          active_mask[np.random.randint(0, self.pop_num)] = True
+        
+        active_indices = np.where(active_mask)[0]
+        num_active = len(active_indices)
+        
+        # initialize at zero
+        direchlet_targets = np.zeros(self.pop_num)
+        
+        # set only active pops to 1, sample them
+        alpha = np.ones(num_active)
+        active_props = np.random.dirichlet(alpha)
+        
+        # add to target vector
+        direchlet_targets[active_indices] = active_props
+        
+        # get appropriate discrete sample numbers, based on row-size
+        counts = np.floor(direchlet_targets * self.row_size).astype(int)
+        
+        # correct any rounding issues that drop actual number of rows below row size
+        remainder = self.row_size - counts.sum()
+        if remainder > 0:
+            # Only distribute remainders to classes that were meant to be active
+            fractional_parts = (direchlet_targets * self.row_size) - counts
+            # Mask out naturally inactive classes by forcing their remainder to 0
+            fractional_parts[~active_mask] = -1.0
+            top_indices = np.argsort(fractional_parts)[::-1][:remainder]
+            counts[top_indices] += 1
+        
+        matrix_chunks = []
+        for pop_id, count in enumerate(counts):
+            if count == 0:
+                continue
+            available_idx = self.pop_to_indices[pop_id]
+            sampled_subset = available_idx[
+                torch.randint(0, len(available_idx), (count,))
+            ]
+            #print(np.stack(self.dataframe["alleles"].iloc[sampled_subset].values).shape)
+            matrix_chunks.append(np.stack(self.dataframe["alleles"].iloc[sampled_subset].values))
+        
+        #x = torch.cat(matrix_chunks, dim=0)
+        #print(matrix_chunks)
+        #for_conv = self.dataframe.sample(n=self.row_size)
+        arr = np.concatenate(matrix_chunks, axis=0)
+        #print(arr.shape)
         indices = np.lexsort(arr.T[::-1])
         sorted_arr = arr[indices]
-        row_order = for_conv.index[indices]
+        #row_order = for_conv.index[indices]
         pop_num = self.pop_num
+        #print(sorted_arr)
         # get props for each set
-        props = []
-        for i in range(pop_num):
-          props.append(for_conv["pop"].to_list().count(self.pop_order[i]))
-        props = np.array(props)/self.row_size
+        #props = []
+        #for i in range(pop_num):
+        #  props.append(for_conv["pop"].to_list().count(self.pop_order[i]))
+        #props = np.array(props)/self.row_size
+        props = np.array(counts)/self.row_size
 
         x = torch.from_numpy(sorted_arr).float().unsqueeze(0)
         y = torch.from_numpy(props).float()
@@ -78,6 +155,7 @@ class permutation_invar_nn(nn.Module):
         self.hidden_layer = nn.Linear(in_features=num_cols, out_features=hidden_size)
         self.relu = nn.ReLU()
         self.output_layer = nn.Linear(in_features=hidden_size, out_features=output_size)
+        self.sfm = nn.SoftMax(dim=1)
 
     def forward(self, x):
         col_means = torch.mean(x, dim=2, keepdim=True)
@@ -90,6 +168,7 @@ class permutation_invar_nn(nn.Module):
         #print(out.shape)
         out = self.relu(out)
         out = self.output_layer(out)
+        out = self.sfm(out)
         out = out.squeeze()
         #print(out.shape)
 
@@ -101,6 +180,7 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     for batch, (X, y) in enumerate(dataloader):
         # Compute prediction and loss
+        #print(y)
         X, y = X.to(device), y.to(device)
         pred = model(X)
         loss = loss_fn(pred, y)
