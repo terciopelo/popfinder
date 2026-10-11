@@ -155,7 +155,7 @@ class permutation_invar_nn(nn.Module):
         self.hidden_layer = nn.Linear(in_features=num_cols, out_features=hidden_size)
         self.relu = nn.ReLU()
         self.output_layer = nn.Linear(in_features=hidden_size, out_features=output_size)
-        self.sfm = nn.SoftMax(dim=1)
+        self.sfm = nn.Softmax(dim=2)
 
     def forward(self, x):
         col_means = torch.mean(x, dim=2, keepdim=True)
@@ -182,9 +182,16 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
         # Compute prediction and loss
         #print(y)
         X, y = X.to(device), y.to(device)
-        pred = model(X)
+        pred1 = model(X)
+        pred = torch.log(pred1)
         loss = loss_fn(pred, y)
-
+        mae = torch.abs(torch.softmax(pred1, dim=-1) - y).mean()
+        print("True Target Matrix vs Model Predictions:")
+        print("------------------------------------------")
+        for i in range(min(3, X.size(0))):
+            print(f"Sample {i+1} True: {y[i].cpu().numpy().round(2)}")
+            print(f"Sample {i+1} Pred: {pred1[i].cpu().detach().numpy().round(2)}\n")
+        print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
         # Backpropagation
         loss.backward()
         optimizer.step()
