@@ -53,9 +53,8 @@ class GenPropData(Dataset):
 
     def __getitem__(self, idx):
         # inflate zeroes by randomly dropping some pops
-        # then use a random 0>x<1 distro within a pop if it is included 
-        # use combinaton of this + direchlet to get a random proportion set (not just
-        # a random sample of n rows)
+        # then use a random pull from a 0>x<1 distro within a pop if it is included 
+        # (not just a random sample of n rows)
         # "zero-inflated direchlet"
         
         active_mask = np.random.rand(self.pop_num) > self.zero_inflation_prob
@@ -141,7 +140,7 @@ class CNNRegressor(nn.Module):
             nn.ReLU(),
             nn.Dropout(0.2),
             nn.Linear(64, pop_num), # output number of variables needed for row
-            nn.Softmax(dim=1) # standardize so response totals 1
+            #nn.Softmax(dim=1) # changed to run softmax only when calculating loss
         )
 
     def forward(self, x):
@@ -187,11 +186,11 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
         #criterion(, y_target)
         loss = loss_fn(torch.log_softmax(pred1, dim=-1), y)
         mae = torch.abs(torch.softmax(pred1, dim=-1) - y).mean()
-        print("True Target Matrix vs Model Predictions:")
-        print("------------------------------------------")
-        for i in range(min(3, X.size(0))):
-            print(f"Sample {i+1} True: {y[i].cpu().numpy().round(2)}")
-            print(f"Sample {i+1} Pred: {pred[i].cpu().detach().numpy().round(2)}\n")
+        #print("True Target Matrix vs Model Predictions:")
+        #print("------------------------------------------")
+        #for i in range(min(3, X.size(0))):
+        #    print(f"Sample {i+1} True: {y[i].cpu().numpy().round(2)}")
+        #    print(f"Sample {i+1} Pred: {pred[i].cpu().detach().numpy().round(2)}\n")
         print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
         # Backpropagation
         loss.backward()
@@ -214,15 +213,32 @@ def test_loop(dataloader, model, loss_fn):
         for X, y in dataloader:
             X, y = X.to(device), y.to(device)
             pred = model(X)
-            test_loss += loss_fn(pred, y).item()
+            test_loss += loss_fn(torch.log_softmax(pred, dim=-1), y).item()
+            pred_t = torch.exp(torch.log_softmax(pred, dim=-1))
             #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
-            correct = torch.mean(torch.nn.functional.pairwise_distance(pred,y, p=2))
-            # also do root-mean-squared error and r2; note pred/y are flipped for these functions
-            rsq = r2_score(y.cpu(),pred.cpu()) 
-            rmse = root_mean_squared_error(y.cpu(),pred.cpu()) 
+            correct = torch.mean(torch.nn.functional.pairwise_distance(pred_t,y, p=2))
+            # also do root-mean-squared error and r2; note pred/y param order are flipped for these functions
+            rsq = r2_score(y.cpu(),pred_t.cpu()) 
+            rmse = root_mean_squared_error(y.cpu(),pred_t.cpu())
+            mae = torch.abs(torch.softmax(pred_t, dim=-1) - y).mean()
     test_loss /= num_batches
     correct /= size
-    return correct, test_loss,rsq,rmse
+    return correct, test_loss,rsq,rmse, mae
+
+def get_unknown_mixture(dataset, model, loss_fn, row_size, iterations=100):
+    # add number of sampling runs as a set-able param?
+    model.eval()
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    with torch.no_grad():
+        prop_list = []
+        for samp in range(iterations):
+            X = torch.from_numpy(np.stack(dataset["alleles"].sample(n=row_size))).float().unsqueeze(0).unsqueeze(0)
+            print(X.shape)
+            X = X.to(device)
+            pred = model(X)
+            pred_t = torch.exp(torch.log_softmax(pred, dim=-1))
+            prop_list.append(pred_t.cpu().numpy())
+    return prop_list
 
 def _generate_train_inputs(data_obj, valid_size, cv_splits, cv_reps, seed=123, bootstrap=False):
 

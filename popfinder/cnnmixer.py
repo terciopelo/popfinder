@@ -165,9 +165,13 @@ class CnnMixer(object):
     @property
     def test_log(self):
         return self.__test_log
+        
+    @property
+    def model(self):
+        return self.__model
 
     def train(self, valid_size=0.2, row_size=24, nreps=1, bootstraps=None,
-              patience=None, min_delta=0, learning_rate=0.001, batch_size=32, 
+              patience=None, min_delta=0, learning_rate=1e-4, batch_size=32, 
               dropout_prop=0, hidden_size=16, hidden_layers=1, optimizer="Adam",
               epochs=100, jobs=1, overwrite_results=False, num_workers=1,boot=False, boot_num =0,
               **hyperparams):
@@ -262,33 +266,32 @@ class CnnMixer(object):
         
         # build loaders for training
         # make num workers user settable?
-        train_loader = DataLoader(train_dataset, batch_size=32, num_workers=1)
-        valid_loader = DataLoader(valid_dataset, batch_size=32, num_workers=1)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers)
+        valid_loader = DataLoader(valid_dataset, batch_size=batch_size, num_workers=num_workers)
         
         # setup for running CNN on graphics card (or CPU, if not avail)
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        
         model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length, 
             kernal_height=5, kernal_width=5, out_channels=16, pooling=4, 
             pop_num = train_dataset.pop_num, h_mpool=1, w_mpool=50000).to(device)
-        self.__model = model
         
         # set loss function, some optimzer setup
         # make these user-adjustable?
-        loss_fn = nn.MSELoss()
+        # add in set up code for other loss functions...
+        loss_fn = nn.KLDivLoss(reduction='batchmean')
         self.__loss_fn = loss_fn
-        learning_rate = 1e-2
-        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
         
-        # set batch size and training epochs
-        # need to make this user adjustable
-        batch_size = 32
-        epochs = epochs
+        # also make optimizer adjustable
+        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        #optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
+        
         loss_list = []
         for t in range(epochs):
           print(f"Epoch {t+1}\n-------------------------------")
           train_loss = train_loop(train_loader, model, loss_fn, optimizer, batch_size)
-          valid_cor, valid_loss, valid_r2,valid_rmse = test_loop(valid_loader, model, loss_fn)
-          loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse))
+          valid_cor, valid_loss, valid_r2,valid_rmse, valid_mae = test_loop(valid_loader, model, loss_fn)
+          loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse, valid_mae))
           if t > 0:
               self.__valid_log = pd.concat([self.__valid_log, pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
                   "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]})], ignore_index=True)
@@ -296,7 +299,9 @@ class CnnMixer(object):
               self.__valid_log = pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
                   "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]}) 
         print("Done!")
+        # edit to include user specifications and paths
         torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
+        self.__model = model
         
 
     def test(self, use_best_model=True, ensemble_accuracy_threshold=0.5, save=True, boot=False):
@@ -318,13 +323,14 @@ class CnnMixer(object):
         """
         
         # build testing data set / loader
+        # change length to be user specified?
         test_dataset = GenPropData(length=100, data_in = self.data.test, row_size = 24)
         test_loader = DataLoader(test_dataset, batch_size=32, num_workers=1)
         
         model = self.__model
         loss_fn = self.__loss_fn
         # run test loop
-        correct_tl, loss_tl, rsq_tl, rmse_tl = test_loop(test_loader,model,loss_fn)
+        correct_tl, loss_tl, rsq_tl, rmse_tl, mae_tl = test_loop(test_loader,model,loss_fn)
         
         if boot:
             self.__test_log = pd.concat([self.__test_log, {"test_correst": [correct_tl],
@@ -332,6 +338,8 @@ class CnnMixer(object):
         else:
             self.__test_log = pd.DataFrame({"test_correst": [correct_tl],
                 "test_loss": [loss_tl], "test_r2":[rsq_tl], "test_rmse" : [rmse_tl]})
+        
+        return correct_tl, loss_tl, rsq_tl, rmse_tl, mae_tl
         
         # incorporate this in once everything is working?
         """
@@ -390,67 +398,9 @@ class CnnMixer(object):
         """
         
         unknown_data = self.data.unknowns
+        unknown_props = get_unknown_mixture(unknown_data, self.__model, self.__loss_fn, self.__row_size, iterations=100)
 
-        X_unknown = unknown_data["alleles"]
-        X_unknown = _data_converter(X_unknown, None)
-
-        if use_best_model:
-            assign_array = self.best_model(X_unknown).argmax(axis=1)
-            preds = self.label_enc.inverse_transform(assign_array)
-            unknown_data.loc[:, "assigned_pop"] = preds
-            assign_array = assign_array.numpy().reshape(-1, 1)
-
-        if "bootstrap" in self.train_history.columns:
-            bootstraps = self.train_history["bootstrap"].unique()
-        else:
-            bootstraps = None
-
-        # TODO: I don't think this chunk of code ever executes now
-            # because bootstraps is 1, not None, if not set
-        # if not use_best_model and bootstraps is None:
-        #     assign_array = self.__assign_on_multiple_models(
-        #         X_unknown, self.__cv_output_folder)
-            
-        #     unknown_data = self.__get_most_common_preds(unknown_data)
-
-        if not use_best_model:
-            reps = self.train_history["rep"].unique()
-            splits = self.train_history["split"].unique()
-            array_width_total = len(bootstraps) * splits.max() * reps.max()
-            assign_array = np.zeros(shape=(len(X_unknown), array_width_total))
-            array_start_position = 0
-            counter = 1
-
-            for rep in reps:
-                for boot in bootstraps:
-                    array_end_position = splits.max() * counter
-                    new_array = self.__assign_on_multiple_models(X_unknown, rep, boot, ensemble_accuracy_threshold)
-                    assign_array[:, array_start_position:array_end_position] = new_array
-                    array_start_position = array_end_position
-                    counter += 1
-
-
-            unknown_data = self.__get_most_common_preds(unknown_data, assign_array)
-
-        self.__classification = unknown_data
-        self.__pred_array = assign_array
-
-        # Creates a table of assignment results for each model in ensemble
-        self.__mod_assign = pd.DataFrame(
-            data = assign_array, 
-            index = unknown_data.index, 
-            columns = ["mod_" + str(i) for i in range(0, assign_array.shape[1])])
-        
-        # Creates a table of sample assignment frequency for each population
-        # TODO: maybe doesn't work for use_best_model=True
-        self.__freq_assign = self.__get_assignment_frequency(assign_array)
-
-        if save:
-            unknown_data.to_csv(os.path.join(self.output_folder,
-                                "classifier_assignment_results.csv"),
-                                index=False)
-        
-        return unknown_data
+        return unknown_props
 
     def __get_assignment_frequency(self, assign_array):
 
