@@ -20,6 +20,7 @@ from popfinder._visualize import _plot_training_curve
 from popfinder._visualize import _plot_confusion_matrix
 from popfinder._visualize import _plot_structure
 from popfinder._helper import _save, _load
+import matplotlib as plt
 
 pd.options.mode.chained_assignment = None
 
@@ -60,10 +61,17 @@ class CnnMixer(object):
         self.__valid_log = None
         self.__model = None
         self.__loss_fn = None
+        self.__test_mae = None
+        self.__unknown_props = None
+        self.__pop_series = data.train["pop"].astype('category').cat.categories
+        self.__criterion = None
 
     @property
     def data(self):
         return self.__data
+    @property
+    def pop_series(self):
+        return self.__pop_series
     
     @property
     def train_set(self):
@@ -169,6 +177,10 @@ class CnnMixer(object):
     @property
     def model(self):
         return self.__model
+    
+    @property
+    def unknown_props(self):
+        return self.__unknown_props
 
     def train(self, valid_size=0.2, row_size=24, nreps=1, bootstraps=None,
               patience=None, min_delta=0, learning_rate=1e-4, batch_size=32, 
@@ -279,25 +291,27 @@ class CnnMixer(object):
         # set loss function, some optimzer setup
         # make these user-adjustable?
         # add in set up code for other loss functions...
-        loss_fn = nn.KLDivLoss(reduction='batchmean')
-        self.__loss_fn = loss_fn
+        #loss_fn = nn.KLDivLoss(reduction='batchmean')
+        #self.__loss_fn = loss_fn
         
+        criterion = DynamicWeightedLoss()
+        self.__criterion = criterion
         # also make optimizer adjustable
-        optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate)
+        optimizer = torch.optim.SGD(list(model.parameters()) + list(criterion.parameters()) , lr=learning_rate)
         #optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         
         loss_list = []
         for t in range(epochs):
           print(f"Epoch {t+1}\n-------------------------------")
-          train_loss = train_loop(train_loader, model, loss_fn, optimizer, batch_size)
-          valid_cor, valid_loss, valid_r2,valid_rmse, valid_mae = test_loop(valid_loader, model, loss_fn)
-          loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse, valid_mae))
+          train_loss = train_loop(train_loader, model, criterion, optimizer, batch_size)
+          valid_cor, valid_loss, valid_r2,valid_rmse, valid_mae, valid_kld = test_loop(valid_loader, model, criterion)
+          loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse, valid_mae, valid_kld))
           if t > 0:
               self.__valid_log = pd.concat([self.__valid_log, pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
-                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]})], ignore_index=True)
+                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "valid_kld": [valid_kld], "boot" : [boot_num]})], ignore_index=True)
           else:
               self.__valid_log = pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
-                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "boot" : [boot_num]}) 
+                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse],"valid_kld": [valid_kld], "boot" : [boot_num]}) 
         print("Done!")
         # edit to include user specifications and paths
         torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
@@ -329,6 +343,7 @@ class CnnMixer(object):
         
         model = self.__model
         loss_fn = self.__loss_fn
+        criterion = self.__criterion
         # run test loop
         correct_tl, loss_tl, rsq_tl, rmse_tl, mae_tl = test_loop(test_loader,model,loss_fn)
         
@@ -339,7 +354,12 @@ class CnnMixer(object):
             self.__test_log = pd.DataFrame({"test_correst": [correct_tl],
                 "test_loss": [loss_tl], "test_r2":[rsq_tl], "test_rmse" : [rmse_tl]})
         
-        return correct_tl, loss_tl, rsq_tl, rmse_tl, mae_tl
+        
+        self.__test_mae = mae_tl
+        print(f"Test loss:  {loss_tl:>4f}")
+        print(f"R-squared: {rsq_tl:>4f}")
+        print(f"RMSE: {rmse_tl:>4f}")
+        print(f"MAE: {mae_tl:>4f}")
         
         # incorporate this in once everything is working?
         """
@@ -399,9 +419,13 @@ class CnnMixer(object):
         
         unknown_data = self.data.unknowns
         unknown_props = get_unknown_mixture(unknown_data, self.__model, self.__loss_fn, self.__row_size, iterations=100)
-
+        
+        self.__unknown_props = unknown_props
         return unknown_props
-
+    
+    def plot_mix(self):
+        plot_pop_fractions(self.__unknown_props,self.__pop_series)
+        
     def __get_assignment_frequency(self, assign_array):
 
         pred_df = pd.DataFrame(assign_array)
@@ -518,17 +542,6 @@ class CnnMixer(object):
                            index=False)
 
         return summary
-    
-    def get_confusion_matrix(self):
-        """
-        Get the confusion matrix for the classification results.
-
-        Returns
-        -------
-        numpy.ndarray
-            Confusion matrix based on the results of running the test() function.
-        """           
-        return self.confusion_matrix
 
     def rank_site_importance(self, save=True):
         """
@@ -753,7 +766,9 @@ class CnnMixer(object):
             raise ValueError("dropout_prop must be between 0 and 1")
 
         # Validate that the number of CV splits is not less than the smallest pop size
-        if row_size > min(self.data.train["pop"].value_counts())*(1-valid_size):
+        if row_size > min(self.data.train["pop"].value_counts()):
+            temp = min(self.data.train["pop"].value_counts())
+            print(f"Minimum row size: {temp:>2f}")
             raise ValueError("Row size cannot be greater than the minimum population size in the training data set (otherwise a 0 fraction for that population will be impossible)")
 
     # Hidden functions below   

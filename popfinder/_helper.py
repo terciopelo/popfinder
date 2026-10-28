@@ -13,6 +13,7 @@ import numpy as np
 from collections import Counter
 from operator import itemgetter
 from sklearn.metrics import r2_score, root_mean_squared_error
+import matplotlib.pyplot as plt
 
 class GenPropData(Dataset):
     # Note: add option to return to old genprop data loader for 
@@ -121,6 +122,13 @@ class GenPropData(Dataset):
         y = torch.from_numpy(props).float()
         return x, y
 
+def plot_pop_fractions(fraction_df,popnames, title='Population fraction estimates', save_name="pop_fractions.png"):
+    x = np.array(popnames)
+    y = np.mean(fraction_df, axis=0).squeeze(0) # get average? Or median?
+    e = np.std(fraction_df, axis=0).squeeze(0)
+    plt.errorbar(x, y, e, linestyle='None', marker='^')
+    plt.savefig(save_name)
+
 class CNNRegressor(nn.Module):
     def __init__(self, row_size, snps, kernal_height, kernal_width, out_channels, h_mpool, w_mpool, pop_num, pooling=1):
         super(CNNRegressor, self).__init__()
@@ -147,6 +155,71 @@ class CNNRegressor(nn.Module):
         x = self.features(x)
         x = self.regressor(x)
         return x
+        
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class TrainableWeightedLoss(nn.Module):
+    def __init__(self, initial_alpha=0.5):
+        super(TrainableAlphaAdmixtureLoss, self).__init__()
+        self.mae = nn.L1Loss()
+        self.kldiv = nn.KLDivLoss(reduction='batchmean')
+        
+        # We store a raw unconstrained parameter (logit). 
+        # inverse_sigmoid maps our starting alpha to its unconstrained space.
+        init_logit = torch.logit(torch.tensor(initial_alpha))
+        self.alpha_logit = nn.Parameter(init_logit)
+
+    def forward(self, p_pred_logits, p_true_probs):
+        # 1. Constrain alpha between 0 and 1 using Sigmoid
+        alpha = torch.sigmoid(self.alpha_logit)
+        
+        # 2. Compute individual losses
+        p_pred_probs = F.softmax(p_pred_logits, dim=-1)
+        p_pred_log_probs = F.log_softmax(p_pred_logits, dim=-1)
+        
+        loss_mae = self.mae(p_pred_probs, p_true_proportions)
+        loss_kld = self.kldiv(p_pred_log_probs, p_true_probs)
+        
+        # 3. Combine using the trainable alpha
+        # MAetic weight = alpha, KL weight = (1 - alpha)
+        total_loss = alpha * loss_mae + (1.0 - alpha) * loss_kld
+        
+        # Return total loss, individual metrics, and current alpha for tracking
+        return total_loss, loss_mae.detach(), loss_kld.detach(), alpha.item()
+
+class DynamicWeightedLoss(nn.Module):
+    def __init__(self):
+        super(DynamicWeightedLoss, self).__init__()
+        self.mae = nn.L1Loss()
+        self.kldiv = nn.KLDivLoss(reduction='batchmean')
+        
+        # Learnable parameters for log variance (s = log(sigma^2))
+        self.log_vars = nn.Parameter(torch.zeros(2))
+
+    def forward(self, p_pred_logits, p_true_probs):
+        p_pred_probs = torch.softmax(p_pred_logits, dim=-1)
+        
+        p_pred_log_probs = torch.log_softmax(p_pred_logits, dim=-1)
+        
+        loss_mae = self.mae(p_pred_probs, p_true_probs)
+        loss_kld = self.kldiv(p_pred_log_probs, p_true_probs)
+        
+        #log_var_mae = self.log_vars[0]
+        #log_var_kld = self.log_vars[1]
+        
+        log_var_mae = torch.clamp(self.log_vars[0], min=-2.0, max=5.0)
+        log_var_kld = torch.clamp(self.log_vars[1], min=-2.0, max=5.0)
+        
+        precision_mae = torch.exp(-log_var_mae)
+        precision_kld = torch.exp(-log_var_kld)
+        
+        weighted_mae = precision_mae * loss_mae + log_var_mae
+        weighted_kld = precision_kld * loss_kld + log_var_kld
+        
+        total_loss = weighted_mae + weighted_kld
+        return total_loss, loss_mae.detach(), loss_kld.detach()
 
 class permutation_invar_nn(nn.Module):
     def __init__(self, num_cols, hidden_size, output_size):
@@ -173,7 +246,7 @@ class permutation_invar_nn(nn.Module):
 
         return out
 
-def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
+def train_loop(dataloader, model, criterion, optimizer, batch_size):
     size = len(dataloader.dataset)
     model.train()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -182,48 +255,74 @@ def train_loop(dataloader, model, loss_fn, optimizer, batch_size):
         #print(y)
         X, y = X.to(device), y.to(device)
         pred1 = model(X)
-        pred = torch.exp(torch.log_softmax(pred1, dim=-1))
+        #pred = torch.exp(torch.log_softmax(pred1, dim=-1))
         #criterion(, y_target)
-        loss = loss_fn(torch.log_softmax(pred1, dim=-1), y)
-        mae = torch.abs(torch.softmax(pred1, dim=-1) - y).mean()
+        #for_loss = torch.log_softmax(pred1, dim=-1)
+        #loss = loss_fn(torch.log_softmax(pred1, dim=-1), y)
+        
+        #for_mae = torch.softmax(pred1, dim=-1)
         #print("True Target Matrix vs Model Predictions:")
         #print("------------------------------------------")
         #for i in range(min(3, X.size(0))):
         #    print(f"Sample {i+1} True: {y[i].cpu().numpy().round(2)}")
         #    print(f"Sample {i+1} Pred: {pred[i].cpu().detach().numpy().round(2)}\n")
-        print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
+        #print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
         # Backpropagation
-        loss.backward()
+        total_loss, mae, kld_loss = criterion(
+        p_pred_logits=pred1, 
+        p_true_probs=y
+        )
+        total_loss.backward()
+        
+        #loss.backward()
         optimizer.step()
         optimizer.zero_grad()
 
         if batch % 100 == 0:
-            loss, current = loss.item(), batch * batch_size + len(X)
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-    return loss
+            print_loss, current = total_loss.item(), batch * batch_size + len(X)
+            print(f"loss: {print_loss:>7f}  [{current:>5d}/{size:>5d}]")
+            print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
+            print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
+    return total_loss
 
-def test_loop(dataloader, model, loss_fn):
+def test_loop(dataloader, model, criterion):
     model.eval()
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    test_loss, correct = 0, 0
+    test_loss, mae, kld_loss, correct = 0, 0, 0, 0
 
     with torch.no_grad():
         for X, y in dataloader:
             X, y = X.to(device), y.to(device)
             pred = model(X)
-            test_loss += loss_fn(torch.log_softmax(pred, dim=-1), y).item()
+            #for_mae = torch.softmax(pred, dim=-1)
+            #for_loss = torch.log_softmax(pred, dim=-1)
+            #test_loss += loss_fn(torch.log_softmax(pred, dim=-1), y).item()
             pred_t = torch.exp(torch.log_softmax(pred, dim=-1))
+            test_loss_it, mae_it, kld_loss_it = criterion( 
+                p_pred_logits=pred, 
+                p_true_probs=y
+            )
+            test_loss += test_loss_it
+            mae += mae_it
+            kld_loss+=kld_loss_it
             #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
             correct = torch.mean(torch.nn.functional.pairwise_distance(pred_t,y, p=2))
             # also do root-mean-squared error and r2; note pred/y param order are flipped for these functions
             rsq = r2_score(y.cpu(),pred_t.cpu()) 
             rmse = root_mean_squared_error(y.cpu(),pred_t.cpu())
-            mae = torch.abs(torch.softmax(pred_t, dim=-1) - y).mean()
+            #mae = torch.abs(torch.softmax(pred_t, dim=-1) - y).mean()
     test_loss /= num_batches
     correct /= size
-    return correct, test_loss,rsq,rmse, mae
+    mae /= num_batches
+    kld_loss /= num_batches
+    print("End epoch test")
+    print("--------------")
+    print(f"test loss: {test_loss:>7f}")
+    print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
+    print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
+    return correct, test_loss,rsq,rmse, mae, kld_loss
 
 def get_unknown_mixture(dataset, model, loss_fn, row_size, iterations=100):
     # add number of sampling runs as a set-able param?
@@ -233,7 +332,7 @@ def get_unknown_mixture(dataset, model, loss_fn, row_size, iterations=100):
         prop_list = []
         for samp in range(iterations):
             X = torch.from_numpy(np.stack(dataset["alleles"].sample(n=row_size))).float().unsqueeze(0).unsqueeze(0)
-            print(X.shape)
+            #print(X.shape)
             X = X.to(device)
             pred = model(X)
             pred_t = torch.exp(torch.log_softmax(pred, dim=-1))
