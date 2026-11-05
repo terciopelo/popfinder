@@ -19,7 +19,7 @@ import matplotlib.pyplot as plt
 class GenPropData(Dataset):
     # Note: add option to return to old genprop data loader for 
     # data sets where sample proportions match field props?
-    def __init__(self, length, data_in, row_size, zero_inflation_prob=0.1):
+    def __init__(self, length, data_in, row_size, zero_inflation_prob=0.1, seed=None):
         self.length = length
         self.dataframe = data_in
        
@@ -40,6 +40,7 @@ class GenPropData(Dataset):
         #self.unique_pops = pd.unique(data_in["pop"]).tolist()
         self.snp_length = len(data_in["alleles"].iloc[0])
         self.zero_inflation_prob = zero_inflation_prob
+        self.seed = seed
         #self.pop_to_indices = {
         #    pop: torch.tensor(data_in.index[data_in["pop"] == pop].tolist(), dtype=torch.long)
         #    for pop in self.unique_pops
@@ -59,11 +60,18 @@ class GenPropData(Dataset):
         # (not just a random sample of n rows)
         # "zero-inflated direchlet"
         
-        active_mask = np.random.rand(self.pop_num) > self.zero_inflation_prob
+        rng = np.random.default_rng(
+            None if self.seed is None else self.seed + int(idx)
+        )
+        torch_rng = None
+        if self.seed is not None:
+            torch_rng = torch.Generator().manual_seed(self.seed + int(idx))
+
+        active_mask = rng.random(self.pop_num) > self.zero_inflation_prob
         
         # ensure not all pops are 0!
         if not np.any(active_mask):
-          active_mask[np.random.randint(0, self.pop_num)] = True
+          active_mask[rng.integers(0, self.pop_num)] = True
         
         active_indices = np.where(active_mask)[0]
         num_active = len(active_indices)
@@ -73,7 +81,7 @@ class GenPropData(Dataset):
         
         # set only active pops to 1, sample them
         alpha = np.ones(num_active)
-        active_props = np.random.dirichlet(alpha)
+        active_props = rng.dirichlet(alpha)
         
         # add to target vector
         direchlet_targets[active_indices] = active_props
@@ -97,7 +105,7 @@ class GenPropData(Dataset):
                 continue
             available_idx = self.pop_to_indices[pop_id]
             sampled_subset = available_idx[
-                torch.randint(0, len(available_idx), (count,))
+                torch.randint(0, len(available_idx), (count,), generator=torch_rng)
             ]
             #print(np.stack(self.dataframe["alleles"].iloc[sampled_subset].values).shape)
             matrix_chunks.append(np.stack(self.dataframe["alleles"].iloc[sampled_subset].values))
@@ -221,7 +229,8 @@ class DynamicWeightedLoss(nn.Module):
         weighted_kld = precision_kld * loss_kld + log_var_kld
         
         total_loss = weighted_mae + weighted_kld
-        return total_loss, loss_mae.detach(), loss_kld.detach()
+        mae_weight = precision_mae / (precision_mae + precision_kld)
+        return total_loss, loss_mae.detach(), loss_kld.detach(), mae_weight.item()
 
 class permutation_invar_nn(nn.Module):
     def __init__(self, num_cols, hidden_size, output_size):
@@ -252,6 +261,8 @@ def train_loop(dataloader, model, criterion, optimizer, batch_size):
     size = len(dataloader.dataset)
     model.train()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    epoch_loss = 0.0
+    seen = 0
     for batch, (X, y) in enumerate(dataloader):
         # Compute prediction and loss
         #print(y)
@@ -279,6 +290,8 @@ def train_loop(dataloader, model, criterion, optimizer, batch_size):
         #loss.backward()
         optimizer.step()
         optimizer.zero_grad()
+        epoch_loss += total_loss.item() * len(X)
+        seen += len(X)
 
         if batch % 100 == 0:
             print_loss, current = total_loss.item(), batch * batch_size + len(X)
@@ -286,45 +299,43 @@ def train_loop(dataloader, model, criterion, optimizer, batch_size):
             print(f"MAE: {mae.cpu().detach().numpy().round(3)}")
             print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
             print(f"alpha: {alpha_loc}\n")
-    return total_loss
+    return torch.tensor(epoch_loss / seen, device=device)
 
 def test_loop(dataloader, model, criterion, mode="train"):
     model.eval()
-    size = len(dataloader.dataset)
-    num_batches = len(dataloader)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    test_loss, mae, kld_loss, alpha_avg, correct, rmse = 0, 0, 0, 0, 0, 0
-    rsq_l = []
+    test_loss, mae, kld_loss, alpha_avg = 0, 0, 0, 0
+    total_samples = 0
+    predictions = []
+    targets = []
 
     with torch.no_grad():
         for X, y in dataloader:
             X, y = X.to(device), y.to(device)
             pred = model(X)
-            #for_mae = torch.softmax(pred, dim=-1)
-            #for_loss = torch.log_softmax(pred, dim=-1)
-            #test_loss += loss_fn(torch.log_softmax(pred, dim=-1), y).item()
             pred_t = torch.exp(torch.log_softmax(pred, dim=-1))
             test_loss_it, mae_it, kld_loss_it, alpha_it = criterion( 
                 p_pred_logits=pred, 
                 p_true_probs=y
             )
-            test_loss += test_loss_it
-            mae += mae_it
-            kld_loss+=kld_loss_it
-            alpha_avg += alpha_it
-            #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
-            correct = torch.mean(torch.nn.functional.pairwise_distance(pred_t,y, p=2))
-            # also do root-mean-squared error and r2; note pred/y param order are flipped for these functions
-            rsq_l.append(r2_score(y.cpu(),pred_t.cpu()))
-            rmse += root_mean_squared_error(y.cpu(),pred_t.cpu())
-            #mae = torch.abs(torch.softmax(pred_t, dim=-1) - y).mean()
-    rsq = statistics.median(rsq_l)
-    rmse /= num_batches
-    test_loss /= num_batches
-    correct /= size
-    mae /= num_batches
-    kld_loss /= num_batches
-    #alpha_avg /= num_batches
+            n_samples = len(X)
+            total_samples += n_samples
+            test_loss += test_loss_it.item() * n_samples
+            mae += mae_it.item() * n_samples
+            kld_loss += kld_loss_it.item() * n_samples
+            alpha_avg += alpha_it * n_samples
+            predictions.append(pred_t.cpu())
+            targets.append(y.cpu())
+
+    all_predictions = torch.cat(predictions)
+    all_targets = torch.cat(targets)
+    correct = torch.linalg.vector_norm(all_predictions - all_targets, dim=1).mean()
+    mae = mae / total_samples
+    rmse = root_mean_squared_error(all_targets.numpy(), all_predictions.numpy())
+    rsq = r2_score(all_targets.numpy(), all_predictions.numpy(), multioutput="variance_weighted")
+    test_loss /= total_samples
+    kld_loss /= total_samples
+    alpha_avg /= total_samples
     if mode == "train":
       print("End epoch test")
       print("--------------")
@@ -332,7 +343,7 @@ def test_loop(dataloader, model, criterion, mode="train"):
       print(f"MAE: {mae.cpu().detach().numpy().round(3)}")
       print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
       #print(f"alpha: {alpha_avg}\n")
-    return correct, test_loss,rsq,rmse, mae, kld_loss
+    return correct, test_loss, rsq, rmse, mae, kld_loss
 
 def get_unknown_mixture(dataset, model, loss_fn, row_size, iterations=100):
     # add number of sampling runs as a set-able param?

@@ -3,6 +3,7 @@ import torch.nn as nn
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, matthews_corrcoef
 from sklearn.metrics import r2_score, root_mean_squared_error
 from sklearn.preprocessing import OneHotEncoder
+from sklearn.model_selection import train_test_split
 from collections import Counter
 import numpy as np
 import pandas as pd
@@ -270,24 +271,40 @@ class CnnMixer(object):
         hyperparams = {k: v for k, v in hyperparams.items() if v is not None}
         
         # generate train/validation set for this particular training run
-        part_80 = self.__train_set.sample(frac = (1-valid_size))
-        remainder_10 = self.__train_set.drop(part_80.index)
+        part_80, remainder_10 = train_test_split(
+            self.__train_set,
+            test_size=valid_size,
+            stratify=self.__train_set["pop"],
+            random_state=self.__random_state,
+        )
         
         # build data set to pass into training
         train_dataset = GenPropData(length=10000, data_in = part_80, row_size = row_size)
-        valid_dataset = GenPropData(length=10000, data_in = remainder_10, row_size = row_size)
+        valid_dataset = GenPropData(
+            length=10000, data_in=remainder_10, row_size=row_size,
+            seed=self.__random_state,
+        )
         
         # build loaders for training
         # make num workers user settable?
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, num_workers=num_workers)
-        valid_loader = DataLoader(valid_dataset, batch_size=batch_size, num_workers=num_workers)
+        train_loader = DataLoader(
+            train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers
+        )
+        valid_loader = DataLoader(
+            valid_dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers
+        )
         
         # setup for running CNN on graphics card (or CPU, if not avail)
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
-        model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length, 
-            kernal_height=1, kernal_width=25, out_channels=16, pooling=4, 
-            pop_num = train_dataset.pop_num, h_mpool=1, w_mpool=50000).to(device)
+        # Keep the dense head bounded. Pooling to 50,000 positions created
+        # ~51M weights in the first dense layer, regardless of SNP count.
+        kernel_width = min(25, train_dataset.snp_length)
+        conv_width = train_dataset.snp_length - kernel_width + 1
+        pooled_width = min(256, conv_width)
+        model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length,
+            kernal_height=1, kernal_width=kernel_width, out_channels=16, pooling=4,
+            pop_num=train_dataset.pop_num, h_mpool=1, w_mpool=pooled_width).to(device)
         
         # set loss function, some optimzer setup
         # make these user-adjustable?
@@ -300,9 +317,14 @@ class CnnMixer(object):
             criterion = TrainableWeightedLoss()
         else:
             criterion = DynamicWeightedLoss()
+        criterion = criterion.to(device)
         self.__criterion = criterion
             
-        optimizer = torch.optim.SGD(list(model.parameters()) + list(criterion.parameters()) , lr=learning_rate, weight_decay=1e-4)
+        optimizer = torch.optim.AdamW(
+            list(model.parameters()) + list(criterion.parameters()),
+            lr=learning_rate,
+            weight_decay=1e-4,
+        )
             
         #optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         
@@ -320,7 +342,7 @@ class CnnMixer(object):
                   "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse],"valid_kld": [valid_kld], "boot" : [boot_num]}) 
         print("Done!")
         # edit to include user specifications and paths
-        torch.save(model.state_dict(), "cnn_small_weights_ls.pth")
+        torch.save(model.state_dict(), os.path.join(self.output_folder, "cnn_small_weights_ls.pth"))
         self.__model = model
         
 
@@ -344,7 +366,10 @@ class CnnMixer(object):
         
         # build testing data set / loader
         # change length to be user specified?
-        test_dataset = GenPropData(length=100, data_in = self.data.test, row_size = 24)
+        test_dataset = GenPropData(
+            length=100, data_in=self.data.test, row_size=self.__row_size,
+            seed=self.__random_state,
+        )
         test_loader = DataLoader(test_dataset, batch_size=32, num_workers=1)
         
         model = self.__model
@@ -366,7 +391,7 @@ class CnnMixer(object):
         print(f"R-squared: {rsq_tl:>4f}")
         print(f"RMSE: {rmse_tl:>4f}")
         print(f"MAE: {mae_tl:>4f}")
-        print(f"alpha: {alpha_tl}")
+        print(f"KL divergence: {alpha_tl}")
         
         # incorporate this in once everything is working?
         """

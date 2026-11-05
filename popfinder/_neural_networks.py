@@ -12,10 +12,13 @@ class ClassifierNet(nn.Module):
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.batch1 = nn.BatchNorm1d(hidden_size)
 
-        self.hidden_layers = [nn.Linear(hidden_size, hidden_size) for i in range(hidden_layers)]
-        # self.hidden_layers = nn.ModuleList(self.hidden_layers)
-        self.batch_layers = [nn.BatchNorm1d(hidden_size) for i in range(hidden_layers)]
-        # self.batch_layers = nn.ModuleList(self.batch_layers)
+        # Register each layer so PyTorch optimizes and serializes its parameters.
+        self.hidden_layers = nn.ModuleList(
+            nn.Linear(hidden_size, hidden_size) for _ in range(hidden_layers)
+        )
+        self.batch_layers = nn.ModuleList(
+            nn.BatchNorm1d(hidden_size) for _ in range(hidden_layers)
+        )
 
         self.fc2 = nn.Linear(hidden_size, batch_size)
         self.batch2 = nn.BatchNorm1d(batch_size)
@@ -30,9 +33,8 @@ class ClassifierNet(nn.Module):
             x = self.batch_layers[i](self.dropout(F.relu(self.hidden_layers[i](x))))
 
         x = self.batch2(self.dropout(F.relu(self.fc2(x))))
-        x = F.softmax(self.fc3(x), dim=1)
-
-        return x
+        # CrossEntropyLoss consumes logits and applies log-softmax internally.
+        return self.fc3(x)
 
 class RegressorNet(nn.Module):
 
