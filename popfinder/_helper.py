@@ -13,6 +13,7 @@ import numpy as np
 from collections import Counter
 from operator import itemgetter
 from sklearn.metrics import r2_score, root_mean_squared_error
+import statistics
 import matplotlib.pyplot as plt
 
 class GenPropData(Dataset):
@@ -135,7 +136,8 @@ class CNNRegressor(nn.Module):
         self.features = nn.Sequential(
             nn.Conv2d(1, out_channels, kernel_size=(kernal_height,kernal_width), padding=0), # 1 input channel (only one snp layer)
             nn.ReLU(),
-            nn.AdaptiveMaxPool2d((h_mpool, w_mpool))
+            nn.AdaptiveAvgPool2d((h_mpool, w_mpool))
+            #nn.AdaptiveMaxPool2d((h_mpool, w_mpool))
             #nn.MaxPool2d(pooling)
         )
         #self.height_end = (((row_size - kernal_height + 1) - pooling ) // pooling) + 1
@@ -162,7 +164,7 @@ import torch.nn.functional as F
 
 class TrainableWeightedLoss(nn.Module):
     def __init__(self, initial_alpha=0.5):
-        super(TrainableAlphaAdmixtureLoss, self).__init__()
+        super(TrainableWeightedLoss, self).__init__()
         self.mae = nn.L1Loss()
         self.kldiv = nn.KLDivLoss(reduction='batchmean')
         
@@ -179,7 +181,7 @@ class TrainableWeightedLoss(nn.Module):
         p_pred_probs = F.softmax(p_pred_logits, dim=-1)
         p_pred_log_probs = F.log_softmax(p_pred_logits, dim=-1)
         
-        loss_mae = self.mae(p_pred_probs, p_true_proportions)
+        loss_mae = self.mae(p_pred_probs, p_true_probs)
         loss_kld = self.kldiv(p_pred_log_probs, p_true_probs)
         
         # 3. Combine using the trainable alpha
@@ -268,7 +270,7 @@ def train_loop(dataloader, model, criterion, optimizer, batch_size):
         #    print(f"Sample {i+1} Pred: {pred[i].cpu().detach().numpy().round(2)}\n")
         #print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
         # Backpropagation
-        total_loss, mae, kld_loss = criterion(
+        total_loss, mae, kld_loss, alpha_loc = criterion(
         p_pred_logits=pred1, 
         p_true_probs=y
         )
@@ -281,16 +283,18 @@ def train_loop(dataloader, model, criterion, optimizer, batch_size):
         if batch % 100 == 0:
             print_loss, current = total_loss.item(), batch * batch_size + len(X)
             print(f"loss: {print_loss:>7f}  [{current:>5d}/{size:>5d}]")
-            print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
+            print(f"MAE: {mae.cpu().detach().numpy().round(3)}")
             print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
+            print(f"alpha: {alpha_loc}\n")
     return total_loss
 
-def test_loop(dataloader, model, criterion):
+def test_loop(dataloader, model, criterion, mode="train"):
     model.eval()
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    test_loss, mae, kld_loss, correct = 0, 0, 0, 0
+    test_loss, mae, kld_loss, alpha_avg, correct, rmse = 0, 0, 0, 0, 0, 0
+    rsq_l = []
 
     with torch.no_grad():
         for X, y in dataloader:
@@ -300,28 +304,34 @@ def test_loop(dataloader, model, criterion):
             #for_loss = torch.log_softmax(pred, dim=-1)
             #test_loss += loss_fn(torch.log_softmax(pred, dim=-1), y).item()
             pred_t = torch.exp(torch.log_softmax(pred, dim=-1))
-            test_loss_it, mae_it, kld_loss_it = criterion( 
+            test_loss_it, mae_it, kld_loss_it, alpha_it = criterion( 
                 p_pred_logits=pred, 
                 p_true_probs=y
             )
             test_loss += test_loss_it
             mae += mae_it
             kld_loss+=kld_loss_it
+            alpha_avg += alpha_it
             #correct += (pred.argmax(1) == y).type(torch.float).sum().item()
             correct = torch.mean(torch.nn.functional.pairwise_distance(pred_t,y, p=2))
             # also do root-mean-squared error and r2; note pred/y param order are flipped for these functions
-            rsq = r2_score(y.cpu(),pred_t.cpu()) 
-            rmse = root_mean_squared_error(y.cpu(),pred_t.cpu())
+            rsq_l.append(r2_score(y.cpu(),pred_t.cpu()))
+            rmse += root_mean_squared_error(y.cpu(),pred_t.cpu())
             #mae = torch.abs(torch.softmax(pred_t, dim=-1) - y).mean()
+    rsq = statistics.median(rsq_l)
+    rmse /= num_batches
     test_loss /= num_batches
     correct /= size
     mae /= num_batches
     kld_loss /= num_batches
-    print("End epoch test")
-    print("--------------")
-    print(f"test loss: {test_loss:>7f}")
-    print(f"MAE: {mae.cpu().detach().numpy().round(3)}\n")
-    print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
+    #alpha_avg /= num_batches
+    if mode == "train":
+      print("End epoch test")
+      print("--------------")
+      print(f"test loss: {test_loss:>7f}")
+      print(f"MAE: {mae.cpu().detach().numpy().round(3)}")
+      print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
+      #print(f"alpha: {alpha_avg}\n")
     return correct, test_loss,rsq,rmse, mae, kld_loss
 
 def get_unknown_mixture(dataset, model, loss_fn, row_size, iterations=100):

@@ -186,6 +186,7 @@ class CnnMixer(object):
               patience=None, min_delta=0, learning_rate=1e-4, batch_size=32, 
               dropout_prop=0, hidden_size=16, hidden_layers=1, optimizer="Adam",
               epochs=100, jobs=1, overwrite_results=False, num_workers=1,boot=False, boot_num =0,
+              optim_choice='Alpha',
               **hyperparams):
         """
         Trains the regressor CNN to identify pop proprotions
@@ -285,7 +286,7 @@ class CnnMixer(object):
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
         model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length, 
-            kernal_height=5, kernal_width=5, out_channels=16, pooling=4, 
+            kernal_height=1, kernal_width=25, out_channels=16, pooling=4, 
             pop_num = train_dataset.pop_num, h_mpool=1, w_mpool=50000).to(device)
         
         # set loss function, some optimzer setup
@@ -293,11 +294,16 @@ class CnnMixer(object):
         # add in set up code for other loss functions...
         #loss_fn = nn.KLDivLoss(reduction='batchmean')
         #self.__loss_fn = loss_fn
-        
-        criterion = DynamicWeightedLoss()
-        self.__criterion = criterion
+
         # also make optimizer adjustable
-        optimizer = torch.optim.SGD(list(model.parameters()) + list(criterion.parameters()) , lr=learning_rate)
+        if optim_choice == 'Alpha':
+            criterion = TrainableWeightedLoss()
+        else:
+            criterion = DynamicWeightedLoss()
+        self.__criterion = criterion
+            
+        optimizer = torch.optim.SGD(list(model.parameters()) + list(criterion.parameters()) , lr=learning_rate, weight_decay=1e-4)
+            
         #optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         
         loss_list = []
@@ -342,10 +348,10 @@ class CnnMixer(object):
         test_loader = DataLoader(test_dataset, batch_size=32, num_workers=1)
         
         model = self.__model
-        loss_fn = self.__loss_fn
+        #loss_fn = self.__loss_fn
         criterion = self.__criterion
         # run test loop
-        correct_tl, loss_tl, rsq_tl, rmse_tl, mae_tl = test_loop(test_loader,model,loss_fn)
+        correct_tl, loss_tl, rsq_tl, rmse_tl, mae_tl, alpha_tl = test_loop(test_loader,model, criterion, mode="test")
         
         if boot:
             self.__test_log = pd.concat([self.__test_log, {"test_correst": [correct_tl],
@@ -360,6 +366,7 @@ class CnnMixer(object):
         print(f"R-squared: {rsq_tl:>4f}")
         print(f"RMSE: {rmse_tl:>4f}")
         print(f"MAE: {mae_tl:>4f}")
+        print(f"alpha: {alpha_tl}")
         
         # incorporate this in once everything is working?
         """
