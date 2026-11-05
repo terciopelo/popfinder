@@ -340,8 +340,8 @@ def test_loop(dataloader, model, criterion, mode="train"):
       print("End epoch test")
       print("--------------")
       print(f"test loss: {test_loss:>7f}")
-      print(f"MAE: {mae.cpu().detach().numpy().round(3)}")
-      print(f"KLDIV: {kld_loss.cpu().detach().numpy().round(3)}")
+      print(f"MAE: {round(mae,3)}")
+      print(f"KLDIV: {round(kld_loss,3)}")
       #print(f"alpha: {alpha_avg}\n")
     return correct, test_loss, rsq, rmse, mae, kld_loss
 
