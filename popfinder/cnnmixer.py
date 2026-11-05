@@ -11,6 +11,7 @@ import os
 import shutil
 from subprocess import call
 import tempfile
+import copy
 
 import popfinder
 from popfinder.dataloader import GeneticData
@@ -329,17 +330,31 @@ class CnnMixer(object):
         #optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
         
         loss_list = []
+        best_valid_mae = float("inf")
+        best_model_state = None
+        epochs_without_improvement = 0
         for t in range(epochs):
           print(f"Epoch {t+1}\n-------------------------------")
           train_loss = train_loop(train_loader, model, criterion, optimizer, batch_size)
           valid_cor, valid_loss, valid_r2,valid_rmse, valid_mae, valid_kld = test_loop(valid_loader, model, criterion)
           loss_list.append((valid_cor, valid_loss,valid_r2,valid_rmse, valid_mae, valid_kld))
-          if t > 0:
-              self.__valid_log = pd.concat([self.__valid_log, pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
-                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "valid_kld": [valid_kld], "boot" : [boot_num]})], ignore_index=True)
+          if valid_mae < best_valid_mae - min_delta:
+              best_valid_mae = valid_mae
+              best_model_state = copy.deepcopy(model.state_dict())
+              epochs_without_improvement = 0
           else:
-              self.__valid_log = pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_correct": [valid_cor.cpu().numpy()],
-                  "valid_loss": [valid_loss], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse],"valid_kld": [valid_kld], "boot" : [boot_num]}) 
+              epochs_without_improvement += 1
+          if t > 0:
+              self.__valid_log = pd.concat([self.__valid_log, pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_l2_error": [valid_cor.cpu().numpy()],
+                  "valid_loss": [valid_loss], "valid_mae": [valid_mae], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "valid_kld": [valid_kld], "boot" : [boot_num]})], ignore_index=True)
+          else:
+              self.__valid_log = pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_l2_error": [valid_cor.cpu().numpy()],
+                  "valid_loss": [valid_loss], "valid_mae": [valid_mae], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse],"valid_kld": [valid_kld], "boot" : [boot_num]})
+          if patience is not None and epochs_without_improvement >= patience:
+              print(f"Stopping early after {t + 1} epochs; validation MAE stopped improving.")
+              break
+        if best_model_state is not None:
+            model.load_state_dict(best_model_state)
         print("Done!")
         # edit to include user specifications and paths
         torch.save(model.state_dict(), os.path.join(self.output_folder, "cnn_small_weights_ls.pth"))
@@ -797,11 +812,10 @@ class CnnMixer(object):
         if dropout_prop > 1 or dropout_prop < 0:
             raise ValueError("dropout_prop must be between 0 and 1")
 
-        # Validate that the number of CV splits is not less than the smallest pop size
-        if row_size > min(self.data.train["pop"].value_counts()):
-            temp = min(self.data.train["pop"].value_counts())
-            print(f"Minimum row size: {temp:>2f}")
-            raise ValueError("Row size cannot be greater than the minimum population size in the training data set (otherwise a 0 fraction for that population will be impossible)")
+        if not isinstance(row_size, int):
+            raise TypeError("row_size must be an integer")
+        if row_size < 1:
+            raise ValueError("row_size must be greater than 0")
 
     # Hidden functions below   
     def __train_on_inputs(self, inputs, cv_splits, epochs, learning_rate, batch_size, 
