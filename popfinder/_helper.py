@@ -139,30 +139,39 @@ def plot_pop_fractions(fraction_df,popnames, title='Population fraction estimate
     plt.savefig(save_name)
 
 class CNNRegressor(nn.Module):
-    def __init__(self, row_size, snps, kernal_height, kernal_width, out_channels, h_mpool, w_mpool, pop_num, pooling=1):
+    def __init__(self, row_size, snps, kernal_height, kernal_width, out_channels,
+                 h_mpool, w_mpool, pop_num, pooling=1, kernel_widths=None):
         super(CNNRegressor, self).__init__()
-        self.features = nn.Sequential(
-            nn.Conv2d(1, out_channels, kernel_size=(kernal_height,kernal_width), padding=0), # 1 input channel (only one snp layer)
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((h_mpool, w_mpool))
-            #nn.AdaptiveMaxPool2d((h_mpool, w_mpool))
-            #nn.MaxPool2d(pooling)
-        )
-        #self.height_end = (((row_size - kernal_height + 1) - pooling ) // pooling) + 1
-        #self.width_end = (((snps - kernal_width + 1) - pooling ) // pooling) + 1
+        if kernel_widths is None:
+            kernel_widths = [kernal_width]
+
+        self.kernel_widths = tuple(kernel_widths)
+        self.features = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(
+                    1,
+                    out_channels,
+                    kernel_size=(kernal_height, width),
+                    padding=(0, width // 2),
+                ),
+                nn.ReLU(),
+            )
+            for width in self.kernel_widths
+        ])
+        feature_channels = out_channels * len(self.kernel_widths)
+        self.pool = nn.AdaptiveAvgPool2d((h_mpool, w_mpool))
         self.regressor = nn.Sequential(
             nn.Flatten(),
-            nn.BatchNorm1d(out_channels * h_mpool * w_mpool),
-            #nn.Linear(out_channels * self.height_end * self.width_end,64), 
-            nn.Linear(out_channels * h_mpool * w_mpool,64),
+            nn.BatchNorm1d(feature_channels * h_mpool * w_mpool),
+            nn.Linear(feature_channels * h_mpool * w_mpool, 64),
             nn.ReLU(),
             nn.Dropout(0.2),
-            nn.Linear(64, pop_num), # output number of variables needed for row
-            #nn.Softmax(dim=1) # changed to run softmax only when calculating loss
+            nn.Linear(64, pop_num),
         )
 
     def forward(self, x):
-        x = self.features(x)
+        x = torch.cat([branch(x) for branch in self.features], dim=1)
+        x = self.pool(x)
         x = self.regressor(x)
         return x
         

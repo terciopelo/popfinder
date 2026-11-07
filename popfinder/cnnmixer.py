@@ -298,14 +298,23 @@ class CnnMixer(object):
         # setup for running CNN on graphics card (or CPU, if not avail)
         device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         
-        # Keep the dense head bounded. Pooling to 50,000 positions created
-        # ~51M weights in the first dense layer, regardless of SNP count.
-        kernel_width = min(25, train_dataset.snp_length)
-        conv_width = train_dataset.snp_length - kernel_width + 1
-        pooled_width = min(256, conv_width)
+        # Parallel branches learn local, medium, and broader SNP patterns.
+        # Odd widths keep each stride-1 branch aligned with the input axis.
+        max_odd_width = train_dataset.snp_length
+        if max_odd_width % 2 == 0:
+            max_odd_width -= 1
+        kernel_widths = set()
+        for width in (5, 25, 101):
+            width = min(width, max_odd_width)
+            if width % 2 == 0:
+                width -= 1
+            kernel_widths.add(max(1, width))
+        kernel_widths = sorted(kernel_widths)
+        pooled_width = min(256, train_dataset.snp_length)
         model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length,
-            kernal_height=1, kernal_width=kernel_width, out_channels=16, pooling=4,
-            pop_num=train_dataset.pop_num, h_mpool=1, w_mpool=pooled_width).to(device)
+            kernal_height=1, kernal_width=kernel_widths[0], out_channels=4, pooling=4,
+            pop_num=train_dataset.pop_num, h_mpool=1, w_mpool=pooled_width,
+            kernel_widths=kernel_widths).to(device)
         
         # set loss function, some optimzer setup
         # make these user-adjustable?
