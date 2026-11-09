@@ -140,7 +140,8 @@ def plot_pop_fractions(fraction_df,popnames, title='Population fraction estimate
 
 class CNNRegressor(nn.Module):
     def __init__(self, row_size, snps, kernal_height, kernal_width, out_channels,
-                 h_mpool, w_mpool, pop_num, pooling=1, kernel_widths=None):
+                 h_mpool, w_mpool, pop_num, pooling=1, kernel_widths=None,
+                 dropout_prop=0.2):
         super(CNNRegressor, self).__init__()
         if kernel_widths is None:
             kernel_widths = [kernal_width]
@@ -165,7 +166,7 @@ class CNNRegressor(nn.Module):
             nn.BatchNorm1d(feature_channels * h_mpool * w_mpool),
             nn.Linear(feature_channels * h_mpool * w_mpool, 64),
             nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.Dropout(dropout_prop),
             nn.Linear(64, pop_num),
         )
 

@@ -186,9 +186,11 @@ class CnnMixer(object):
 
     def train(self, valid_size=0.2, row_size=24, nreps=1, bootstraps=None,
               patience=None, min_delta=0, learning_rate=1e-4, batch_size=32, 
-              dropout_prop=0, hidden_size=16, hidden_layers=1, optimizer="Adam",
+              dropout_prop=0.2, hidden_size=16, hidden_layers=1, optimizer="Adam",
               epochs=100, jobs=1, overwrite_results=False, num_workers=1,boot=False, boot_num =0,
               optim_choice='Alpha',
+              filters_per_branch=4,
+              num_conv_branches=3,
               **hyperparams):
         """
         Trains the regressor CNN to identify pop proprotions
@@ -214,7 +216,14 @@ class CnnMixer(object):
         batch_size : int, optional
             Batch size for the neural network. The default is 32.
         dropout_prop : float, optional
-            Dropout proportion for the neural network. The default is 0.
+            Dropout proportion in the CNN prediction head. The default is 0.2.
+        filters_per_branch : int, optional
+            Number of convolutional filters used by each SNP-width branch.
+            The default is 4.
+        num_conv_branches : int, optional
+            Number of parallel convolution branches to use (1, 2, or 3).
+            One branch uses the middle SNP scale; two use fine and broad
+            scales; three use all scales. The default is 3.
         hidden_size : int, optional
             Number of neurons in the hidden layer. The default is 16.
         hidden_layers : int, optional
@@ -250,7 +259,8 @@ class CnnMixer(object):
         # run some checks on the parameters used for training
         # need to remove/update some of these
         self._validate_train_inputs(epochs, valid_size, row_size, nreps,
-                                    learning_rate, batch_size, dropout_prop)
+                                    learning_rate, batch_size, dropout_prop,
+                                    filters_per_branch, num_conv_branches)
                                     
         # since row size is needed for testing as well, update the object's global
         self.__row_size = row_size
@@ -303,18 +313,23 @@ class CnnMixer(object):
         max_odd_width = train_dataset.snp_length
         if max_odd_width % 2 == 0:
             max_odd_width -= 1
-        kernel_widths = set()
-        for width in (5, 25, 101):
+        width_options = {
+            1: (25,),
+            2: (5, 101),
+            3: (5, 25, 101),
+        }[num_conv_branches]
+        kernel_widths = []
+        for width in width_options:
             width = min(width, max_odd_width)
             if width % 2 == 0:
                 width -= 1
-            kernel_widths.add(max(1, width))
-        kernel_widths = sorted(kernel_widths)
+            kernel_widths.append(max(1, width))
         pooled_width = min(256, train_dataset.snp_length)
         model = CNNRegressor(row_size=train_dataset.row_size, snps=train_dataset.snp_length,
-            kernal_height=1, kernal_width=kernel_widths[0], out_channels=4, pooling=4,
+            kernal_height=1, kernal_width=kernel_widths[0],
+            out_channels=filters_per_branch, pooling=4,
             pop_num=train_dataset.pop_num, h_mpool=1, w_mpool=pooled_width,
-            kernel_widths=kernel_widths).to(device)
+            kernel_widths=kernel_widths, dropout_prop=dropout_prop).to(device)
         
         # set loss function, some optimzer setup
         # make these user-adjustable?
@@ -784,7 +799,8 @@ class CnnMixer(object):
                 raise TypeError("output_folder must be a string")
 
     def _validate_train_inputs(self, epochs, valid_size, row_size, nreps,
-                               learning_rate, batch_size, dropout_prop):
+                               learning_rate, batch_size, dropout_prop,
+                               filters_per_branch, num_conv_branches):
 
         if not isinstance(epochs, (int, float, complex)):
             raise TypeError("epochs must be an integer")
@@ -820,6 +836,16 @@ class CnnMixer(object):
 
         if dropout_prop > 1 or dropout_prop < 0:
             raise ValueError("dropout_prop must be between 0 and 1")
+
+        if not isinstance(filters_per_branch, int):
+            raise TypeError("filters_per_branch must be an integer")
+        if filters_per_branch < 1:
+            raise ValueError("filters_per_branch must be greater than 0")
+
+        if not isinstance(num_conv_branches, int):
+            raise TypeError("num_conv_branches must be an integer")
+        if num_conv_branches not in (1, 2, 3):
+            raise ValueError("num_conv_branches must be 1, 2, or 3")
 
         if not isinstance(row_size, int):
             raise TypeError("row_size must be an integer")
