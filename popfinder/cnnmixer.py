@@ -25,6 +25,7 @@ from popfinder._mixture_estimators import (
     estimate_average_ancestry as _estimate_average_ancestry,
     estimate_mixture_proportions_em as _estimate_mixture_proportions_em,
     cross_validate_mixture_estimators as _cross_validate_mixture_estimators,
+    validate_mixture_estimators_on_holdout as _validate_mixture_estimators_on_holdout,
 )
 import matplotlib.pyplot as plt
 
@@ -654,6 +655,66 @@ class CnnMixer(object):
         return _cross_validate_mixture_estimators(
             labeled_data=labeled_data,
             n_splits=n_splits,
+            random_state=random_state,
+            pseudocount=pseudocount,
+            prior_strength=prior_strength,
+            tolerance=tolerance,
+            max_iter=max_iter,
+            ridge=ridge,
+        )
+
+    def validate_mixture_estimators_on_holdout(
+        self,
+        sample_size=10,
+        mixture_resolution=10,
+        n_replicates=3,
+        random_state=None,
+        pseudocount=0.5,
+        prior_strength=0.0,
+        tolerance=1e-7,
+        max_iter=500,
+        ridge=1e-6,
+    ):
+        """Test mixture estimates on controlled cohorts from the test split.
+
+        Reference allele frequencies are fitted on ``data.train``. Cohorts are
+        sampled from ``data.test`` at every grid composition on the population
+        simplex, including pure-population edge cases. Every cohort has exactly
+        ``sample_size`` samples; all test samples within a cohort are unique.
+        Each test population must therefore contain at least ``sample_size``
+        held-out samples.
+
+        Parameters
+        ----------
+        sample_size : int, optional
+            Number of held-out individuals per mixture cohort. The default is 10.
+        mixture_resolution : int, optional
+            Number of equal intervals between zero and one for the simplex grid.
+            For example, 10 tests fractions in 0.1 increments. The default is 10.
+        n_replicates : int, optional
+            Number of independently sampled cohorts per composition. The default
+            is 3.
+        random_state : int or None, optional
+            Seed for reproducible sample selection. Defaults to this mixer's seed.
+        pseudocount, prior_strength, tolerance, max_iter, ridge : float, optional
+            Settings passed to the reference-frequency estimators.
+
+        Returns
+        -------
+        dict
+            ``results`` contains per-replicate metrics and target/realized
+            fractions, ``summary`` aggregates metrics by composition, and
+            ``selected_samples`` records the held-out individuals used.
+        """
+        if random_state is None:
+            random_state = self.random_state
+
+        return _validate_mixture_estimators_on_holdout(
+            reference_data=self.data.train,
+            holdout_data=self.data.test,
+            sample_size=sample_size,
+            mixture_resolution=mixture_resolution,
+            n_replicates=n_replicates,
             random_state=random_state,
             pseudocount=pseudocount,
             prior_strength=prior_strength,

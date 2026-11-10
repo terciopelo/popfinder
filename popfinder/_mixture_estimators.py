@@ -1,5 +1,7 @@
 """Reference-frequency estimators for sets of unknown SNP samples."""
 
+from math import comb
+
 import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
@@ -395,4 +397,256 @@ def cross_validate_mixture_estimators(
         "summary": summary,
         "fold_fractions": pd.DataFrame(fraction_rows),
         "individual_ancestry": pd.concat(ancestry_rows, ignore_index=True),
+    }
+
+
+def _integer_compositions(total, parts):
+    """Yield all nonnegative integer vectors of length ``parts`` summing to total."""
+    if parts == 1:
+        yield (total,)
+        return
+    for first in range(total + 1):
+        for rest in _integer_compositions(total - first, parts - 1):
+            yield (first,) + rest
+
+
+def validate_mixture_estimators_on_holdout(
+    reference_data,
+    holdout_data,
+    sample_size=10,
+    mixture_resolution=10,
+    n_replicates=3,
+    random_state=123,
+    pseudocount=0.5,
+    prior_strength=0.0,
+    tolerance=1e-7,
+    max_iter=500,
+    ridge=1e-6,
+):
+    """Score both estimators on controlled mixtures sampled from held-out data.
+
+    The test population labels are used only to assemble cohorts with known
+    source-population fractions. Each cohort is exactly ``sample_size`` samples;
+    samples are drawn without replacement within a cohort. The simplex grid
+    contains all target fraction vectors whose components are multiples of
+    ``1 / mixture_resolution``, including pure-population vertices.
+
+    Returns per-replicate metrics, metrics averaged by mixture scenario, and the
+    selected held-out sample IDs. Estimated fractions are compared with the
+    realized cohort fractions after integer allocation.
+    """
+    if not isinstance(sample_size, int) or sample_size < 1:
+        raise ValueError("sample_size must be a positive integer")
+    if not isinstance(mixture_resolution, int) or mixture_resolution < 1:
+        raise ValueError("mixture_resolution must be a positive integer")
+    if not isinstance(n_replicates, int) or n_replicates < 1:
+        raise ValueError("n_replicates must be a positive integer")
+    if reference_data is None or reference_data.empty:
+        raise ValueError("reference_data must contain training samples")
+    if holdout_data is None or holdout_data.empty:
+        raise ValueError("holdout_data must contain held-out samples")
+    for name, data in (("reference_data", reference_data), ("holdout_data", holdout_data)):
+        if "pop" not in data.columns:
+            raise ValueError(f"{name} must have a 'pop' column")
+        if data["pop"].isna().any():
+            raise ValueError(f"{name} cannot contain unknown population labels")
+
+    reference_matrix = _dosage_matrix(reference_data, "reference_data")
+    holdout_matrix = _dosage_matrix(holdout_data, "holdout_data")
+    if reference_matrix.shape[1] != holdout_matrix.shape[1]:
+        raise ValueError(
+            "reference_data and holdout_data must contain the same number of SNPs "
+            "in the same order"
+        )
+
+    populations = pd.unique(reference_data["pop"]).tolist()
+    if len(populations) < 2:
+        raise ValueError("At least two reference populations are required")
+    holdout_labels = holdout_data["pop"].to_numpy()
+    absent_holdout = [
+        population for population in populations
+        if not np.any(holdout_labels == population)
+    ]
+    extra_holdout = [
+        population for population in pd.unique(holdout_labels)
+        if population not in populations
+    ]
+    if absent_holdout or extra_holdout:
+        raise ValueError(
+            "Training and hold-out data must contain the same population labels; "
+            f"missing hold-out populations={absent_holdout}, "
+            f"hold-out populations absent from training={extra_holdout}"
+        )
+
+    n_scenarios = comb(mixture_resolution + len(populations) - 1, len(populations) - 1)
+    if n_scenarios > 10000:
+        raise ValueError(
+            f"The requested simplex grid has {n_scenarios} mixtures. Reduce "
+            "mixture_resolution or the number of populations to stay at or "
+            "below 10,000 scenarios."
+        )
+    count_by_population = holdout_data["pop"].value_counts()
+    insufficient = {
+        population: int(count_by_population.get(population, 0))
+        for population in populations
+        if count_by_population.get(population, 0) < sample_size
+    }
+    if insufficient:
+        raise ValueError(
+            "Each hold-out population needs at least sample_size samples because "
+            "the simplex grid includes a pure-population cohort. Insufficient "
+            f"hold-out counts: {insufficient}"
+        )
+
+    allocations = []
+    for integer_mix in _integer_compositions(mixture_resolution, len(populations)):
+        target = np.asarray(integer_mix, dtype=float) / mixture_resolution
+        exact_counts = target * sample_size
+        sample_counts = np.floor(exact_counts).astype(int)
+        remainder = sample_size - int(sample_counts.sum())
+        if remainder:
+            fractional = exact_counts - sample_counts
+            order = np.argsort(-fractional, kind="stable")
+            sample_counts[order[:remainder]] += 1
+        allocations.append((target, sample_counts))
+
+    holdout_positions = {
+        population: np.flatnonzero(holdout_labels == population)
+        for population in populations
+    }
+    reference_prior = (
+        reference_data["pop"].value_counts(normalize=True)
+        .reindex(populations, fill_value=0)
+        .to_numpy(dtype=float)
+    )
+    # Per-sample ancestry fits depend on the reference panel and genotype, not
+    # on cohort composition, so fit each hold-out sample only once.
+    _, holdout_ancestry = estimate_average_ancestry(
+        reference_data=reference_data,
+        unknown_data=holdout_data,
+        populations=populations,
+        pseudocount=pseudocount,
+        ridge=ridge,
+        return_individual=True,
+    )
+    rng = np.random.default_rng(random_state)
+    result_rows = []
+    selected_rows = []
+    metric_columns = [
+        "em_fraction_mae",
+        "em_fraction_rmse",
+        "em_total_variation",
+        "ancestry_mean_fraction_mae",
+        "ancestry_mean_fraction_rmse",
+        "ancestry_sample_mae",
+        "ancestry_sample_rmse",
+        "ancestry_sample_argmax_accuracy",
+        "reference_prior_fraction_mae",
+    ]
+
+    for scenario, (target_fractions, sample_counts) in enumerate(allocations, start=1):
+        for replicate in range(1, n_replicates + 1):
+            selected_positions = []
+            for population, count in zip(populations, sample_counts):
+                if count:
+                    selected_positions.extend(
+                        rng.choice(holdout_positions[population], size=count, replace=False).tolist()
+                    )
+            selected_positions = np.asarray(selected_positions, dtype=int)
+            selected_positions = selected_positions[rng.permutation(len(selected_positions))]
+            cohort = holdout_data.iloc[selected_positions]
+            actual_fractions = (
+                cohort["pop"].value_counts(normalize=True)
+                .reindex(populations, fill_value=0)
+                .to_numpy(dtype=float)
+            )
+
+            em_estimate = estimate_mixture_proportions_em(
+                reference_data=reference_data,
+                unknown_data=cohort,
+                populations=populations,
+                pseudocount=pseudocount,
+                prior_strength=prior_strength,
+                tolerance=tolerance,
+                max_iter=max_iter,
+            )
+            em_fractions = em_estimate.reindex(populations).to_numpy(dtype=float)
+            ancestry_values = (
+                holdout_ancestry.iloc[selected_positions]
+                .loc[:, populations]
+                .to_numpy(dtype=float)
+            )
+            ancestry_fractions = ancestry_values.mean(axis=0)
+            true_individual = (
+                cohort["pop"].to_numpy()[:, None]
+                == np.asarray(populations, dtype=object)[None, :]
+            ).astype(float)
+            ancestry_sample_error = ancestry_values - true_individual
+            em_error = em_fractions - actual_fractions
+            ancestry_mean_error = ancestry_fractions - actual_fractions
+            prior_error = reference_prior - actual_fractions
+
+            row = {
+                "scenario": scenario,
+                "replicate": replicate,
+                "sample_size": sample_size,
+                "em_fraction_mae": float(np.mean(np.abs(em_error))),
+                "em_fraction_rmse": float(np.sqrt(np.mean(em_error ** 2))),
+                "em_total_variation": float(0.5 * np.sum(np.abs(em_error))),
+                "ancestry_mean_fraction_mae": float(np.mean(np.abs(ancestry_mean_error))),
+                "ancestry_mean_fraction_rmse": float(
+                    np.sqrt(np.mean(ancestry_mean_error ** 2))
+                ),
+                "ancestry_sample_mae": float(np.mean(np.abs(ancestry_sample_error))),
+                "ancestry_sample_rmse": float(
+                    np.sqrt(np.mean(ancestry_sample_error ** 2))
+                ),
+                "ancestry_sample_argmax_accuracy": float(
+                    np.mean(
+                        np.argmax(ancestry_values, axis=1)
+                        == np.argmax(true_individual, axis=1)
+                    )
+                ),
+                "reference_prior_fraction_mae": float(np.mean(np.abs(prior_error))),
+                "em_converged": bool(em_estimate.attrs["converged"]),
+                "em_iterations": int(em_estimate.attrs["iterations"]),
+            }
+            for population_index, population in enumerate(populations):
+                row[f"target_fraction_{population}"] = target_fractions[population_index]
+                row[f"true_fraction_{population}"] = actual_fractions[population_index]
+                row[f"em_estimate_{population}"] = em_fractions[population_index]
+                row[f"ancestry_estimate_{population}"] = ancestry_fractions[population_index]
+            result_rows.append(row)
+
+            sample_ids = (
+                cohort["sampleID"].to_numpy()
+                if "sampleID" in cohort.columns
+                else cohort.index.to_numpy()
+            )
+            selected_rows.extend({
+                "scenario": scenario,
+                "replicate": replicate,
+                "sample_id": sample_id,
+                "true_pop": population,
+            } for sample_id, population in zip(sample_ids, cohort["pop"].to_numpy()))
+
+    results = pd.DataFrame(result_rows)
+    grouped = results.groupby("scenario", sort=True)
+    summary_values = grouped[metric_columns].agg(["mean", "std"])
+    summary_values.columns = [f"{metric}_{stat}" for metric, stat in summary_values.columns]
+    summary = summary_values.reset_index()
+    scenario_columns = [
+        column for column in results.columns
+        if column.startswith("target_fraction_")
+    ]
+    summary = summary.merge(
+        results[["scenario"] + scenario_columns].drop_duplicates("scenario"),
+        on="scenario",
+        how="left",
+    )
+
+    return {
+        "results": results,
+        "summary": summary,
+        "selected_samples": pd.DataFrame(selected_rows),
     }
