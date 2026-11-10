@@ -18,11 +18,14 @@ from popfinder.dataloader import GeneticData
 from popfinder._neural_networks import ClassifierNet
 from popfinder._helper import *
 from popfinder._visualize import _plot_assignment
-from popfinder._visualize import _plot_training_curve
 from popfinder._visualize import _plot_confusion_matrix
 from popfinder._visualize import _plot_structure
 from popfinder._helper import _save, _load
-import matplotlib as plt
+from popfinder._mixture_estimators import (
+    estimate_average_ancestry as _estimate_average_ancestry,
+    estimate_mixture_proportions_em as _estimate_mixture_proportions_em,
+)
+import matplotlib.pyplot as plt
 
 pd.options.mode.chained_assignment = None
 
@@ -191,6 +194,7 @@ class CnnMixer(object):
               optim_choice='Alpha',
               filters_per_branch=4,
               num_conv_branches=3,
+              weight_decay=1e-4,
               **hyperparams):
         """
         Trains the regressor CNN to identify pop proprotions
@@ -224,6 +228,8 @@ class CnnMixer(object):
             Number of parallel convolution branches to use (1, 2, or 3).
             One branch uses the middle SNP scale; two use fine and broad
             scales; three use all scales. The default is 3.
+        weight_decay : float, optional
+            AdamW weight-decay coefficient. The default is 1e-4.
         hidden_size : int, optional
             Number of neurons in the hidden layer. The default is 16.
         hidden_layers : int, optional
@@ -260,7 +266,8 @@ class CnnMixer(object):
         # need to remove/update some of these
         self._validate_train_inputs(epochs, valid_size, row_size, nreps,
                                     learning_rate, batch_size, dropout_prop,
-                                    filters_per_branch, num_conv_branches)
+                                    filters_per_branch, num_conv_branches,
+                                    weight_decay)
                                     
         # since row size is needed for testing as well, update the object's global
         self.__row_size = row_size
@@ -348,7 +355,7 @@ class CnnMixer(object):
         optimizer = torch.optim.AdamW(
             list(model.parameters()) + list(criterion.parameters()),
             lr=learning_rate,
-            weight_decay=1e-4,
+            weight_decay=weight_decay,
         )
             
         #optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
@@ -369,10 +376,10 @@ class CnnMixer(object):
           else:
               epochs_without_improvement += 1
           if t > 0:
-              self.__valid_log = pd.concat([self.__valid_log, pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_l2_error": [valid_cor.cpu().numpy()],
+              self.__valid_log = pd.concat([self.__valid_log, pd.DataFrame({"epoch": [t + 1], "train_loss": [train_loss.cpu().detach().numpy()],"valid_l2_error": [valid_cor.cpu().numpy()],
                   "valid_loss": [valid_loss], "valid_mae": [valid_mae], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse], "valid_kld": [valid_kld], "boot" : [boot_num]})], ignore_index=True)
           else:
-              self.__valid_log = pd.DataFrame({"train_loss": [train_loss.cpu().detach().numpy()],"valid_l2_error": [valid_cor.cpu().numpy()],
+              self.__valid_log = pd.DataFrame({"epoch": [t + 1], "train_loss": [train_loss.cpu().detach().numpy()],"valid_l2_error": [valid_cor.cpu().numpy()],
                   "valid_loss": [valid_loss], "valid_mae": [valid_mae], "valid_r2":[valid_r2], "valid_rmse" : [valid_rmse],"valid_kld": [valid_kld], "boot" : [boot_num]})
           if patience is not None and epochs_without_improvement >= patience:
               print(f"Stopping early after {t + 1} epochs; validation MAE stopped improving.")
@@ -493,6 +500,107 @@ class CnnMixer(object):
         
         self.__unknown_props = unknown_props
         return unknown_props
+
+    def estimate_mixture_proportions_em(
+        self,
+        unknown_data=None,
+        reference_data=None,
+        pseudocount=0.5,
+        prior_strength=0.0,
+        tolerance=1e-7,
+        max_iter=500,
+    ):
+        """Estimate the composition of a set of unknown individuals by EM.
+
+        This treats each individual as a member of one source population and
+        estimates the fraction of individuals from each source. It is a
+        population-composition estimator, not an admixture estimator.
+
+        Parameters default to this object's unknown samples and known reference
+        samples. Both data frames must contain SNP dosage vectors in the same
+        SNP order, and the reference frame must contain a ``pop`` column.
+
+        Returns
+        -------
+        pandas.Series
+            Estimated sample fractions indexed by population. Convergence
+            information is available in ``result.attrs``.
+        """
+        if reference_data is None:
+            reference_data = self.data.knowns
+        if unknown_data is None:
+            unknown_data = self.data.unknowns
+        populations = None
+        if hasattr(reference_data, "columns") and "pop" in reference_data.columns:
+            reference_populations = pd.unique(reference_data["pop"]).tolist()
+            populations = [
+                population for population in self.label_enc.classes_
+                if population in reference_populations
+            ]
+            populations.extend(
+                population for population in reference_populations
+                if population not in populations
+            )
+
+        return _estimate_mixture_proportions_em(
+            reference_data=reference_data,
+            unknown_data=unknown_data,
+            populations=populations,
+            pseudocount=pseudocount,
+            prior_strength=prior_strength,
+            tolerance=tolerance,
+            max_iter=max_iter,
+        )
+
+    def estimate_average_ancestry(
+        self,
+        unknown_data=None,
+        reference_data=None,
+        pseudocount=0.5,
+        ridge=1e-6,
+        return_individual=False,
+    ):
+        """Estimate mean ancestry fractions for a set of unknown samples.
+
+        Each sample is fitted as a potentially admixed combination of reference
+        allele frequencies. The reported mean is the arithmetic average of the
+        per-sample ancestry fractions; set ``return_individual=True`` to also
+        receive the per-sample estimates.
+
+        Parameters default to this object's unknown samples and known reference
+        samples. Both data frames must contain SNP dosage vectors in the same
+        SNP order, and the reference frame must contain a ``pop`` column.
+
+        Returns
+        -------
+        pandas.Series or tuple
+            Mean ancestry fractions indexed by population, or a tuple of that
+            series and a per-sample ancestry DataFrame when requested.
+        """
+        if reference_data is None:
+            reference_data = self.data.knowns
+        if unknown_data is None:
+            unknown_data = self.data.unknowns
+        populations = None
+        if hasattr(reference_data, "columns") and "pop" in reference_data.columns:
+            reference_populations = pd.unique(reference_data["pop"]).tolist()
+            populations = [
+                population for population in self.label_enc.classes_
+                if population in reference_populations
+            ]
+            populations.extend(
+                population for population in reference_populations
+                if population not in populations
+            )
+
+        return _estimate_average_ancestry(
+            reference_data=reference_data,
+            unknown_data=unknown_data,
+            populations=populations,
+            pseudocount=pseudocount,
+            ridge=ridge,
+            return_individual=return_individual,
+        )
     
     def plot_mix(self):
         plot_pop_fractions(self.__unknown_props,self.__pop_series)
@@ -669,30 +777,51 @@ class CnnMixer(object):
         return ranking
 
     # Plotting functions below
-    def plot_training_curve(self, save=True, facet_by_split_rep=False, 
+    def plot_training_curve(self, save=True, facet_by_split_rep=False,
                             y_axis_zero=False):
-        """
-        Plots the training curve.
-        
+        """Plot training and validation loss by epoch.
+
         Parameters
         ----------
         save : bool, optional
-            Whether to save the plot to a png file. The default is True.
+            Save the plot to the output folder. The default is True.
         facet_by_split_rep : bool, optional
-            Whether to facet the plot by split and rep. If False and more than
-            1 split and rep have been used during training, then the training
-            plot will contain variability corresponding to the multiple runs.
-            The default is False.
+            Retained for API compatibility; CnnMixer currently records one
+            training run per call, so no faceting is applied.
         y_axis_zero : bool, optional
-            Whether to set the y-axis to start at 0. The default is False.
-            
+            Start the y-axis at zero. The default is False.
+
         Returns
         -------
-        None
+        matplotlib.figure.Figure
+            The figure containing the loss curves.
         """
+        if self.__valid_log is None or self.__valid_log.empty:
+            raise ValueError("No training history available. Run train() first.")
 
-        _plot_training_curve(self.train_history, self.__nn_type,
-            self.output_folder, save, facet_by_split_rep, y_axis_zero)
+        history = self.__valid_log
+        epochs = (history["epoch"].to_numpy() if "epoch" in history.columns
+                  else np.arange(1, len(history) + 1))
+
+        fig, ax = plt.subplots()
+        ax.plot(epochs, history["train_loss"].astype(float), label="Training")
+        ax.plot(epochs, history["valid_loss"].astype(float), label="Validation")
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel("Loss")
+        ax.set_title("CNN Mixer Training and Validation Loss")
+        if y_axis_zero:
+            ax.set_ylim(bottom=0)
+        ax.legend()
+        fig.tight_layout()
+
+        if save:
+            os.makedirs(self.output_folder, exist_ok=True)
+            fig.savefig(
+                os.path.join(self.output_folder, "cnnmixer_training_curve.png"),
+                bbox_inches="tight",
+            )
+
+        return fig
 
     def plot_assignment(self, save=True, col_scheme="Spectral"):
         """
@@ -800,7 +929,8 @@ class CnnMixer(object):
 
     def _validate_train_inputs(self, epochs, valid_size, row_size, nreps,
                                learning_rate, batch_size, dropout_prop,
-                               filters_per_branch, num_conv_branches):
+                               filters_per_branch, num_conv_branches,
+                               weight_decay):
 
         if not isinstance(epochs, (int, float, complex)):
             raise TypeError("epochs must be an integer")
@@ -846,6 +976,11 @@ class CnnMixer(object):
             raise TypeError("num_conv_branches must be an integer")
         if num_conv_branches not in (1, 2, 3):
             raise ValueError("num_conv_branches must be 1, 2, or 3")
+
+        if not isinstance(weight_decay, (int, float)):
+            raise TypeError("weight_decay must be a number")
+        if not np.isfinite(weight_decay) or weight_decay < 0:
+            raise ValueError("weight_decay must be greater than or equal to 0")
 
         if not isinstance(row_size, int):
             raise TypeError("row_size must be an integer")
