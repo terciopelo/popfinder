@@ -24,6 +24,7 @@ from popfinder._helper import _save, _load
 from popfinder._mixture_estimators import (
     estimate_average_ancestry as _estimate_average_ancestry,
     estimate_mixture_proportions_em as _estimate_mixture_proportions_em,
+    cross_validate_mixture_estimators as _cross_validate_mixture_estimators,
 )
 import matplotlib.pyplot as plt
 
@@ -600,6 +601,65 @@ class CnnMixer(object):
             pseudocount=pseudocount,
             ridge=ridge,
             return_individual=return_individual,
+        )
+
+    def cross_validate_mixture_estimators(
+        self,
+        n_splits=5,
+        random_state=None,
+        labeled_data=None,
+        pseudocount=0.5,
+        prior_strength=0.0,
+        tolerance=1e-7,
+        max_iter=500,
+        ridge=1e-6,
+    ):
+        """Compare both estimators with stratified k-fold validation.
+
+        Known samples are split into stratified folds. In each fold, allele
+        frequencies are fitted using only the training samples and predictions
+        are scored against labels from held-out samples. The ancestry method's
+        individual scores are compared with one-hot labels, so this measures
+        performance on pure reference individuals, not on admixed individuals.
+        EM reports fraction MAE/RMSE and total variation; ancestry reports
+        individual MAE/RMSE, argmax accuracy, and mean-fraction error. Metrics
+        include a training-population-frequency baseline. Any supervised SNP
+        filtering must be repeated within each fold to avoid label leakage; this
+        method uses the dosage vectors it receives as-is.
+
+        Parameters
+        ----------
+        n_splits : int, optional
+            Number of stratified folds. Every population must have at least this
+            many labeled samples. The default is 5.
+        random_state : int or None, optional
+            Seed for reproducible fold assignments. Defaults to this mixer's
+            random state.
+        labeled_data : pandas.DataFrame or None, optional
+            Labeled dosage data to validate. Defaults to ``data.knowns``.
+        pseudocount, prior_strength, tolerance, max_iter, ridge : float, optional
+            Regularization and convergence settings passed to the estimators.
+
+        Returns
+        -------
+        dict
+            Contains ``fold_metrics`` and aggregate ``summary`` DataFrames, plus
+            held-out ``fold_fractions`` and out-of-fold ``individual_ancestry``.
+        """
+        if labeled_data is None:
+            labeled_data = self.data.knowns
+        if random_state is None:
+            random_state = self.random_state
+
+        return _cross_validate_mixture_estimators(
+            labeled_data=labeled_data,
+            n_splits=n_splits,
+            random_state=random_state,
+            pseudocount=pseudocount,
+            prior_strength=prior_strength,
+            tolerance=tolerance,
+            max_iter=max_iter,
+            ridge=ridge,
         )
     
     def plot_mix(self):
