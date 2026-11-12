@@ -24,6 +24,7 @@ from popfinder._helper import _save, _load
 from popfinder._mixture_estimators import (
     estimate_average_ancestry as _estimate_average_ancestry,
     estimate_mixture_proportions_em as _estimate_mixture_proportions_em,
+    estimate_mixture_proportions_bayesian as _estimate_mixture_proportions_bayesian,
     cross_validate_mixture_estimators as _cross_validate_mixture_estimators,
     validate_mixture_estimators_on_holdout as _validate_mixture_estimators_on_holdout,
 )
@@ -552,6 +553,91 @@ class CnnMixer(object):
             prior_strength=prior_strength,
             tolerance=tolerance,
             max_iter=max_iter,
+        )
+
+    def estimate_mixture_proportions_bayesian(
+        self,
+        unknown_data=None,
+        reference_data=None,
+        n_iter=2000,
+        burn_in=100,
+        sample_interval=1,
+        allele_prior=0.5,
+        pi_prior=None,
+        pi_prior_sum=1.0,
+        initial_pi=None,
+        random_state=None,
+    ):
+        """Estimate mixture proportions with Rubias's conditional MCMC model.
+
+        This implements the default Rubias ``method="MCMC"`` for diploid,
+        biallelic SNP dosages. It integrates allele frequencies using a
+        Dirichlet-multinomial genotype likelihood and returns posterior mixture
+        draws and Rao-Blackwellized individual assignment probabilities. The
+        optional Rubias ``BR`` and ``PB`` methods are not included.
+
+        Parameters default to this object's unknown and known samples. Their
+        dosage vectors must contain the same SNPs in the same order.
+
+        Parameters
+        ----------
+        n_iter : int, optional
+            Total Gibbs sweeps. The default is 2000.
+        burn_in : int, optional
+            Initial sweeps excluded from posterior summaries. The default is 100.
+        sample_interval : int, optional
+            Save every this many post-burn-in mixture draws. The default is 1.
+        allele_prior : float, optional
+            Symmetric Dirichlet prior added per allele copy. The default 0.5
+            matches Rubias's scaled-constant prior for biallelic SNPs.
+        pi_prior : array-like or None, optional
+            Dirichlet concentration for each population, in result population
+            order. If omitted, use a symmetric prior with total mass
+            ``pi_prior_sum``.
+        pi_prior_sum : float, optional
+            Total concentration of the symmetric mixture prior. The default is 1.
+        initial_pi : array-like or None, optional
+            Positive starting mixture proportions, normalized internally.
+        random_state : int or None, optional
+            Seed for reproducibility. Defaults to this mixer's random state.
+
+        Returns
+        -------
+        dict
+            Posterior mixture means and intervals, individual assignment
+            probabilities, retained mixture trace, and sampler settings.
+        """
+        if reference_data is None:
+            reference_data = self.data.knowns
+        if unknown_data is None:
+            unknown_data = self.data.unknowns
+        if random_state is None:
+            random_state = self.random_state
+
+        populations = None
+        if hasattr(reference_data, "columns") and "pop" in reference_data.columns:
+            reference_populations = pd.unique(reference_data["pop"]).tolist()
+            populations = [
+                population for population in self.label_enc.classes_
+                if population in reference_populations
+            ]
+            populations.extend(
+                population for population in reference_populations
+                if population not in populations
+            )
+
+        return _estimate_mixture_proportions_bayesian(
+            reference_data=reference_data,
+            unknown_data=unknown_data,
+            populations=populations,
+            n_iter=n_iter,
+            burn_in=burn_in,
+            sample_interval=sample_interval,
+            allele_prior=allele_prior,
+            pi_prior=pi_prior,
+            pi_prior_sum=pi_prior_sum,
+            initial_pi=initial_pi,
+            random_state=random_state,
         )
 
     def estimate_average_ancestry(

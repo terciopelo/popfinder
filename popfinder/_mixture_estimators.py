@@ -650,3 +650,229 @@ def validate_mixture_estimators_on_holdout(
         "summary": summary,
         "selected_samples": pd.DataFrame(selected_rows),
     }
+
+
+def _rubias_genotype_log_likelihoods(
+    reference_data,
+    unknown_data,
+    populations,
+    allele_prior,
+):
+    """Build Rubias-style conditional genotype log likelihoods for biallelic SNPs."""
+    if not isinstance(allele_prior, (int, float)) or not np.isfinite(allele_prior):
+        raise TypeError("allele_prior must be a finite number")
+    if allele_prior <= 0:
+        raise ValueError("allele_prior must be greater than 0")
+    if "pop" not in reference_data.columns:
+        raise ValueError("reference_data must have a 'pop' column")
+    if reference_data["pop"].isna().any():
+        raise ValueError("reference_data cannot contain unknown population labels")
+
+    reference = _dosage_matrix(reference_data, "reference_data")
+    unknown = _dosage_matrix(unknown_data, "unknown_data")
+    if reference.shape[1] != unknown.shape[1]:
+        raise ValueError(
+            "reference_data and unknown_data must contain the same number of SNPs "
+            "in the same order"
+        )
+
+    if populations is None:
+        populations = pd.unique(reference_data["pop"]).tolist()
+    else:
+        populations = list(populations)
+    if not populations:
+        raise ValueError("At least one reference population is required")
+
+    reference_counts = []
+    alternate_counts = []
+    keep_loci = np.zeros(reference.shape[1], dtype=bool)
+    for population in populations:
+        pop_mask = reference_data["pop"].to_numpy() == population
+        if not np.any(pop_mask):
+            raise ValueError(f"No reference samples found for population {population!r}")
+
+        population_genotypes = reference[pop_mask]
+        called = np.isfinite(population_genotypes)
+        n_called = called.sum(axis=0)
+        keep_loci |= n_called > 0
+        alt_count = np.nansum(population_genotypes, axis=0)
+        alternate_counts.append(alt_count)
+        reference_counts.append(2 * n_called - alt_count)
+
+    if not np.any(keep_loci):
+        raise ValueError("No SNPs have observed genotypes in the reference data")
+
+    reference_counts = np.asarray(reference_counts, dtype=float)[:, keep_loci]
+    alternate_counts = np.asarray(alternate_counts, dtype=float)[:, keep_loci]
+    unknown = unknown[:, keep_loci]
+    if np.any(np.isfinite(unknown).sum(axis=1) == 0):
+        raise ValueError("Every unknown sample must have at least one called SNP")
+
+    # Rubias's default scaled-constant allele prior has total mass 1 per
+    # biallelic locus, equivalent here to allele_prior=0.5 for each allele.
+    ref_parameter = reference_counts + allele_prior
+    alt_parameter = alternate_counts + allele_prior
+    total_parameter = ref_parameter + alt_parameter
+    log_denominator = np.log(total_parameter) + np.log(total_parameter + 1)
+
+    log_genotype_probabilities = (
+        np.log(ref_parameter) + np.log(ref_parameter + 1) - log_denominator,
+        np.log(2.0) + np.log(ref_parameter) + np.log(alt_parameter) - log_denominator,
+        np.log(alt_parameter) + np.log(alt_parameter + 1) - log_denominator,
+    )
+
+    log_likelihood = np.zeros((len(unknown), len(populations)), dtype=float)
+    for dosage, population_log_probabilities in enumerate(log_genotype_probabilities):
+        observed_dosage = unknown == dosage
+        log_likelihood += np.einsum(
+            "ij,kj->ik", observed_dosage, population_log_probabilities
+        )
+
+    return log_likelihood, unknown_data, populations
+
+
+def estimate_mixture_proportions_bayesian(
+    reference_data,
+    unknown_data,
+    populations=None,
+    n_iter=2000,
+    burn_in=100,
+    sample_interval=1,
+    allele_prior=0.5,
+    pi_prior=None,
+    pi_prior_sum=1.0,
+    initial_pi=None,
+    random_state=123,
+):
+    """Estimate mixture fractions using Rubias's conditional Bayesian MCMC.
+
+    This ports the default Rubias ``method="MCMC"`` model for diploid,
+    biallelic SNP dosage data. Allele frequencies are integrated out with a
+    Dirichlet-multinomial predictive likelihood; MCMC alternates between
+    sampling an origin population for each unknown and sampling mixture
+    proportions from their Dirichlet full conditional. It does not implement
+    Rubias's optional baseline-resampling ``BR`` or bootstrap ``PB`` methods.
+
+    Returns posterior mixture means, credible intervals, Rao-Blackwellized
+    individual assignment probabilities, and a trace of retained mixture draws.
+    """
+    if not isinstance(n_iter, int) or n_iter < 2:
+        raise ValueError("n_iter must be an integer greater than or equal to 2")
+    if not isinstance(burn_in, int) or burn_in < 0 or burn_in >= n_iter:
+        raise ValueError("burn_in must be an integer in [0, n_iter)")
+    if not isinstance(sample_interval, int) or sample_interval < 1:
+        raise ValueError("sample_interval must be a positive integer")
+    if not isinstance(pi_prior_sum, (int, float)) or not np.isfinite(pi_prior_sum):
+        raise TypeError("pi_prior_sum must be a finite number")
+    if pi_prior_sum <= 0:
+        raise ValueError("pi_prior_sum must be greater than 0")
+
+    log_likelihood, unknown_data, populations = _rubias_genotype_log_likelihoods(
+        reference_data=reference_data,
+        unknown_data=unknown_data,
+        populations=populations,
+        allele_prior=allele_prior,
+    )
+    n_unknown, n_populations = log_likelihood.shape
+
+    if pi_prior is None:
+        pi_alpha = np.full(n_populations, pi_prior_sum / n_populations, dtype=float)
+    else:
+        pi_alpha = np.asarray(pi_prior, dtype=float)
+        if pi_alpha.shape != (n_populations,):
+            raise ValueError("pi_prior must have one value per reference population")
+        if np.any(~np.isfinite(pi_alpha)) or np.any(pi_alpha <= 0):
+            raise ValueError("All pi_prior values must be finite and greater than 0")
+
+    if initial_pi is None:
+        pi = np.full(n_populations, 1 / n_populations, dtype=float)
+    else:
+        pi = np.asarray(initial_pi, dtype=float)
+        if pi.shape != (n_populations,):
+            raise ValueError("initial_pi must have one value per reference population")
+        if np.any(~np.isfinite(pi)) or np.any(pi <= 0) or pi.sum() <= 0:
+            raise ValueError("All initial_pi values must be finite and greater than 0")
+        pi = pi / pi.sum()
+
+    rng = np.random.default_rng(random_state)
+    pi_total = np.zeros(n_populations, dtype=float)
+    assignment_total = np.zeros((n_unknown, n_populations), dtype=float)
+    retained_iterations = 0
+    saved_iterations = []
+    saved_pi = []
+
+    for iteration in range(1, n_iter + 1):
+        log_joint = log_likelihood + np.log(pi)[None, :]
+        assignment_probabilities = np.exp(
+            log_joint - logsumexp(log_joint, axis=1, keepdims=True)
+        )
+        cumulative_probabilities = np.cumsum(assignment_probabilities, axis=1)
+        draws = rng.random(n_unknown)
+        origin = np.sum(draws[:, None] > cumulative_probabilities, axis=1)
+        origin = np.minimum(origin, n_populations - 1)
+
+        counts = np.bincount(origin, minlength=n_populations)
+        pi = rng.dirichlet(pi_alpha + counts)
+
+        if iteration > burn_in:
+            # Rao-Blackwellize individual origin probabilities conditional on
+            # the newly drawn mixture proportions, as in Rubias's MCMC method.
+            log_joint = log_likelihood + np.log(pi)[None, :]
+            assignment_probabilities = np.exp(
+                log_joint - logsumexp(log_joint, axis=1, keepdims=True)
+            )
+            pi_total += pi
+            assignment_total += assignment_probabilities
+            retained_iterations += 1
+
+            if (iteration - burn_in) % sample_interval == 0 or iteration == n_iter:
+                saved_iterations.append(iteration)
+                saved_pi.append(pi.copy())
+
+    trace_values = np.asarray(saved_pi, dtype=float)
+    trace = pd.DataFrame(trace_values, columns=populations)
+    trace.insert(0, "iteration", saved_iterations)
+    trace.index.name = "draw"
+
+    posterior_mean = pi_total / retained_iterations
+    posterior_sd = (
+        np.std(trace_values, axis=0, ddof=1)
+        if len(trace_values) > 1
+        else np.full(n_populations, np.nan)
+    )
+    credible_interval = np.quantile(trace_values, [0.025, 0.975], axis=0)
+    proportion_summary = pd.DataFrame(
+        {
+            "posterior_mean": posterior_mean,
+            "posterior_sd": posterior_sd,
+            "credible_interval_2.5%": credible_interval[0],
+            "credible_interval_97.5%": credible_interval[1],
+        },
+        index=populations,
+    )
+    proportion_summary.index.name = "population"
+
+    proportions = pd.Series(
+        posterior_mean, index=populations, name="posterior_mean"
+    )
+    individual_posteriors = pd.DataFrame(
+        assignment_total / retained_iterations,
+        index=(unknown_data["sampleID"].to_numpy()
+               if "sampleID" in unknown_data.columns else unknown_data.index),
+        columns=populations,
+    )
+    individual_posteriors.index.name = "sampleID"
+
+    return {
+        "mixture_proportions": proportions,
+        "proportion_summary": proportion_summary,
+        "individual_posteriors": individual_posteriors,
+        "trace": trace,
+        "diagnostics": {
+            "iterations": n_iter,
+            "burn_in": burn_in,
+            "retained_iterations": retained_iterations,
+            "saved_draws": len(trace_values),
+            "pi_prior": pd.Series(pi_alpha, index=populations),
+        },
+    }
