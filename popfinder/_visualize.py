@@ -122,11 +122,9 @@ def _plot_structure(preds, col_scheme, nn_type, output_folder, save):
 def _plot_mixture_comparison(
     estimates,
     intervals,
-    validation_errors,
-    holdout_rmse,
-    cnn_test_rmse,
-    classifier_cv_rmse,
-    validation_label,
+    holdout_mae,
+    cnn_test_mae,
+    classifier_cv_mae,
     output_folder,
     save=True,
     filename="mixture_method_comparison.png",
@@ -139,16 +137,8 @@ def _plot_mixture_comparison(
         raise ValueError("At least one method and one population are required")
 
     if figsize is None:
-        figsize = (max(9, 1.5 * len(populations)), 8 if validation_errors else 6)
-    if validation_errors:
-        fig, (ax, error_ax) = plt.subplots(
-            2,
-            1,
-            figsize=figsize,
-            gridspec_kw={"height_ratios": [2, 1]},
-        )
-    else:
-        fig, ax = plt.subplots(figsize=figsize)
+        figsize = (max(9, 1.5 * len(populations)), 6)
+    fig, ax = plt.subplots(figsize=figsize)
     positions = np.arange(len(populations))
     bar_width = 0.8 / len(methods)
     offsets = (np.arange(len(methods)) - (len(methods) - 1) / 2) * bar_width
@@ -179,14 +169,14 @@ def _plot_mixture_comparison(
                 capsize=3,
             )
 
-        if method in holdout_rmse:
-            rmse = holdout_rmse[method]
+        if method in holdout_mae:
+            mae = holdout_mae[method]
             ax.errorbar(
                 bar_positions,
                 values,
                 yerr=np.vstack([
-                    np.minimum(values, rmse),
-                    np.minimum(1 - values, rmse),
+                    np.minimum(values, mae),
+                    np.minimum(1 - values, mae),
                 ]),
                 fmt="none",
                 ecolor=colors[method_index],
@@ -194,14 +184,14 @@ def _plot_mixture_comparison(
                 capsize=3,
             )
 
-        if method in cnn_test_rmse:
-            rmse = cnn_test_rmse[method]
+        if method in cnn_test_mae:
+            mae = cnn_test_mae[method]
             ax.errorbar(
                 bar_positions,
                 values,
                 yerr=np.vstack([
-                    np.minimum(values, rmse),
-                    np.minimum(1 - values, rmse),
+                    np.minimum(values, mae),
+                    np.minimum(1 - values, mae),
                 ]),
                 fmt="none",
                 ecolor=colors[method_index],
@@ -209,14 +199,14 @@ def _plot_mixture_comparison(
                 capsize=3,
             )
 
-        if method in classifier_cv_rmse:
-            rmse = classifier_cv_rmse[method]
+        if method in classifier_cv_mae:
+            mae = classifier_cv_mae[method]
             ax.errorbar(
                 bar_positions,
                 values,
                 yerr=np.vstack([
-                    np.minimum(values, rmse),
-                    np.minimum(1 - values, rmse),
+                    np.minimum(values, mae),
+                    np.minimum(1 - values, mae),
                 ]),
                 fmt="none",
                 ecolor=colors[method_index],
@@ -230,19 +220,19 @@ def _plot_mixture_comparison(
     ax.set_ylabel("Estimated mixture fraction")
     ax.set_xlabel("Population")
     empirical_error_sources = []
-    if holdout_rmse:
-        empirical_error_sources.append("mixture hold-out RMSE")
-    if cnn_test_rmse:
-        empirical_error_sources.append("CNN test RMSE")
-    if classifier_cv_rmse:
-        empirical_error_sources.append("Popfinder k-fold RMSE")
+    if holdout_mae:
+        empirical_error_sources.append("mixture hold-out MAE")
+    if cnn_test_mae:
+        empirical_error_sources.append("CNN test MAE")
+    if classifier_cv_mae:
+        empirical_error_sources.append("Popfinder k-fold MAE")
 
     if intervals and empirical_error_sources:
         ax.set_title(
             "Population mixture estimates by method\n"
             "Black: Bayesian 95% credible intervals; colored: "
             + " and ".join(empirical_error_sources)
-            + " (RMSE bars are not confidence intervals)"
+            + " (MAE bars are not confidence intervals)"
         )
     elif intervals:
         ax.set_title(
@@ -260,31 +250,6 @@ def _plot_mixture_comparison(
         ax.set_title("Population mixture estimates by method")
     ax.legend(title="Method", bbox_to_anchor=(1.02, 1), loc="upper left")
     ax.grid(axis="y", alpha=0.25)
-
-    if validation_errors:
-        validation_methods = list(validation_errors)
-        means = np.asarray(
-            [validation_errors[method][0] for method in validation_methods],
-            dtype=float,
-        )
-        standard_deviations = np.asarray(
-            [validation_errors[method][1] for method in validation_methods],
-            dtype=float,
-        )
-        error_ax.bar(
-            validation_methods,
-            means,
-            yerr=standard_deviations,
-            capsize=4,
-            color=[colors[methods.index(method)] for method in validation_methods],
-        )
-        error_ax.set_ylim(0, 1)
-        error_ax.set_ylabel("Mean absolute fraction error")
-        error_ax.set_xlabel("Mixture estimator")
-        error_ax.set_title(
-            f"{validation_label} MAE (bars: mean; error bars: ±1 SD)"
-        )
-        error_ax.grid(axis="y", alpha=0.25)
 
     fig.tight_layout()
 

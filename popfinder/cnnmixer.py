@@ -71,7 +71,7 @@ class CnnMixer(object):
         self.__model = None
         self.__loss_fn = None
         self.__test_mae = None
-        self.__test_fraction_rmse = None
+        self.__test_fraction_mae = None
         self.__unknown_props = None
         self.__pop_series = data.train["pop"].astype('category').cat.categories
         self.__criterion = None
@@ -185,9 +185,9 @@ class CnnMixer(object):
         return self.__test_log
 
     @property
-    def test_fraction_rmse(self):
-        """Per-population RMSE measured by ``test()`` on synthetic hold-out mixtures."""
-        return self.__test_fraction_rmse
+    def test_fraction_mae(self):
+        """Per-population MAE measured by ``test()`` on synthetic hold-out mixtures."""
+        return self.__test_fraction_mae
         
     @property
     def model(self):
@@ -279,7 +279,7 @@ class CnnMixer(object):
                                     learning_rate, batch_size, dropout_prop,
                                     filters_per_branch, num_conv_branches,
                                     weight_decay)
-        self.__test_fraction_rmse = None
+        self.__test_fraction_mae = None
                                     
         # since row size is needed for testing as well, update the object's global
         self.__row_size = row_size
@@ -423,7 +423,7 @@ class CnnMixer(object):
 
         Notes
         -----
-        Per-population RMSE is stored in ``test_fraction_rmse`` for plotting.
+        Per-population MAE is stored in ``test_fraction_mae`` for plotting.
         """
         
         # build testing data set / loader
@@ -458,10 +458,10 @@ class CnnMixer(object):
             raise ValueError(
                 "The CNN test outputs do not match the mixer's population labels"
             )
-        self.__test_fraction_rmse = pd.Series(
-            np.sqrt(np.mean((predictions - targets) ** 2, axis=0)),
+        self.__test_fraction_mae = pd.Series(
+            np.mean(np.abs(predictions - targets), axis=0),
             index=self.label_enc.classes_,
-            name="test_rmse",
+            name="test_mae",
         )
         
         if boot:
@@ -873,7 +873,7 @@ class CnnMixer(object):
         The classifier's per-sample assignment frequencies are averaged across
         the unknown set. Bayesian credible intervals are shown when its result
         includes the posterior summary. If ``test()`` has been run, per-population
-        CNN test RMSE is also drawn on the CNN Mixer bars. If it has not been run
+        CNN test MAE is also drawn on the CNN Mixer bars. If it has not been run
         and this mixer has a trained model, the comparison runs ``test(save=False)``
         to calculate those error bars.
 
@@ -888,7 +888,7 @@ class CnnMixer(object):
             data. Pass these to customize estimator settings.
         cnn_result : optional
             Precomputed CNN Mixer subset predictions. If omitted, use
-            ``unknown_props`` or run ``assign_unknown()``. CNN test RMSE error bars
+            ``unknown_props`` or run ``assign_unknown()``. CNN test MAE error bars
             are available after calling ``test()``.
         classifier_result : pandas.DataFrame or None, optional
             Precomputed result from ``classifier.get_assignment_summary()``.
@@ -907,12 +907,10 @@ class CnnMixer(object):
         figsize : tuple or None, optional
             Matplotlib figure size. Defaults to a width based on population count.
         validation_result : dict or None, optional
-            Output from ``cross_validate_mixture_estimators()`` or
-            ``validate_mixture_estimators_on_holdout()``. Adds a lower panel
-            showing held-out fraction MAE for EM and average ancestry, with
-            one-standard-deviation error bars across folds or hold-out cohorts.
-            Hold-out results also add population-specific RMSE error bars to the
-            EM and average-ancestry fraction estimates.
+            Output from ``validate_mixture_estimators_on_holdout()``. Adds
+            population-specific MAE error bars to the EM and average-ancestry
+            estimates in the main plot. K-fold mixture validation results are
+            not used for these error bars.
 
         Returns
         -------
@@ -978,7 +976,7 @@ class CnnMixer(object):
             classifier_cv_validation = getattr(
                 classifier, "cv_validation_predictions", None
             )
-        classifier_cv_rmse = {}
+        classifier_cv_mae = {}
         if classifier_cv_validation is not None:
             if not isinstance(classifier_cv_validation, pd.DataFrame):
                 raise TypeError("classifier_cv_validation must be a pandas DataFrame")
@@ -1027,8 +1025,8 @@ class CnnMixer(object):
                 fold_fraction_errors.append(predicted_fractions - true_fractions)
             if not fold_fraction_errors:
                 raise ValueError("classifier_cv_validation contains no validation folds")
-            classifier_cv_rmse["Popfinder classifier"] = np.sqrt(
-                np.mean(np.square(np.stack(fold_fraction_errors)), axis=0)
+            classifier_cv_mae["Popfinder classifier"] = np.mean(
+                np.abs(np.stack(fold_fraction_errors)), axis=0
             )
 
         method_results = {
@@ -1040,111 +1038,72 @@ class CnnMixer(object):
         }
         estimates = {}
         intervals = {}
-        validation_errors = {}
-        holdout_rmse = {}
-        cnn_test_rmse = {}
-        validation_label = None
+        holdout_mae = {}
+        cnn_test_mae = {}
 
         if validation_result is not None:
-            if not isinstance(validation_result, dict):
-                raise TypeError("validation_result must be a mixture-validation result dict")
-            if isinstance(validation_result.get("fold_metrics"), pd.DataFrame):
-                validation_frame = validation_result["fold_metrics"]
-                validation_label = "Cross-validation"
-            elif isinstance(validation_result.get("results"), pd.DataFrame):
-                validation_frame = validation_result["results"]
-                validation_label = "Hold-out mixture validation"
-            else:
+            if (
+                not isinstance(validation_result, dict)
+                or not isinstance(validation_result.get("results"), pd.DataFrame)
+            ):
                 raise ValueError(
-                    "validation_result must come from cross_validate_mixture_estimators() "
-                    "or validate_mixture_estimators_on_holdout()"
+                    "validation_result must come from "
+                    "validate_mixture_estimators_on_holdout()"
                 )
-
-            validation_metrics = {
-                "EM": "em_fraction_mae",
-                "Average ancestry": "ancestry_mean_fraction_mae",
-            }
-            for method, column in validation_metrics.items():
-                if column not in validation_frame.columns:
-                    raise ValueError(
-                        f"validation_result is missing the '{column}' metric"
-                    )
-                metric_values = pd.to_numeric(
-                    validation_frame[column], errors="coerce"
-                ).dropna().to_numpy(dtype=float)
-                if metric_values.size == 0 or np.any(~np.isfinite(metric_values)):
-                    raise ValueError(
-                        f"validation_result has no finite values for '{column}'"
-                    )
-                if np.any((metric_values < 0) | (metric_values > 1)):
-                    raise ValueError(
-                        f"validation metric '{column}' must be between 0 and 1"
-                    )
-                metric_sd = (
-                    float(np.std(metric_values, ddof=1))
-                    if metric_values.size > 1 else 0.0
-                )
-                validation_errors[method] = (
-                    float(np.mean(metric_values)),
-                    metric_sd,
-                )
-
-            if validation_label == "Hold-out mixture validation":
-                for method, estimate_prefix in (
-                    ("EM", "em_estimate_"),
-                    ("Average ancestry", "ancestry_estimate_"),
-                ):
-                    population_rmse = []
-                    for population in populations:
-                        estimate_column = f"{estimate_prefix}{population}"
-                        truth_column = f"true_fraction_{population}"
-                        if (
-                            estimate_column not in validation_frame.columns
-                            or truth_column not in validation_frame.columns
-                        ):
-                            raise ValueError(
-                                "Hold-out validation results must include per-population "
-                                f"estimates and true fractions for {population!r}"
-                            )
-                        estimate_values = pd.to_numeric(
-                            validation_frame[estimate_column], errors="coerce"
-                        ).to_numpy(dtype=float)
-                        truth_values = pd.to_numeric(
-                            validation_frame[truth_column], errors="coerce"
-                        ).to_numpy(dtype=float)
-                        valid_rows = np.isfinite(estimate_values) & np.isfinite(truth_values)
-                        if not np.any(valid_rows):
-                            raise ValueError(
-                                f"Hold-out validation has no finite errors for {population!r}"
-                            )
-                        residuals = estimate_values[valid_rows] - truth_values[valid_rows]
-                        population_rmse.append(
-                            float(np.sqrt(np.mean(residuals ** 2)))
+            validation_frame = validation_result["results"]
+            for method, estimate_prefix in (
+                ("EM", "em_estimate_"),
+                ("Average ancestry", "ancestry_estimate_"),
+            ):
+                population_mae = []
+                for population in populations:
+                    estimate_column = f"{estimate_prefix}{population}"
+                    truth_column = f"true_fraction_{population}"
+                    if (
+                        estimate_column not in validation_frame.columns
+                        or truth_column not in validation_frame.columns
+                    ):
+                        raise ValueError(
+                            "Hold-out validation results must include per-population "
+                            f"estimates and true fractions for {population!r}"
                         )
-                    holdout_rmse[method] = np.asarray(population_rmse, dtype=float)
+                    estimate_values = pd.to_numeric(
+                        validation_frame[estimate_column], errors="coerce"
+                    ).to_numpy(dtype=float)
+                    truth_values = pd.to_numeric(
+                        validation_frame[truth_column], errors="coerce"
+                    ).to_numpy(dtype=float)
+                    valid_rows = np.isfinite(estimate_values) & np.isfinite(truth_values)
+                    if not np.any(valid_rows):
+                        raise ValueError(
+                            f"Hold-out validation has no finite errors for {population!r}"
+                        )
+                    residuals = estimate_values[valid_rows] - truth_values[valid_rows]
+                    population_mae.append(float(np.mean(np.abs(residuals))))
+                holdout_mae[method] = np.asarray(population_mae, dtype=float)
 
-        if self.test_fraction_rmse is None and self.model is not None:
+        if self.test_fraction_mae is None and self.model is not None:
             self.test(save=False)
 
-        if self.test_fraction_rmse is not None:
+        if self.test_fraction_mae is not None:
             unknown_test_populations = [
-                population for population in self.test_fraction_rmse.index
+                population for population in self.test_fraction_mae.index
                 if population not in populations
             ]
             missing_test_populations = [
                 population for population in populations
-                if population not in self.test_fraction_rmse.index
+                if population not in self.test_fraction_mae.index
             ]
             if unknown_test_populations or missing_test_populations:
                 raise ValueError(
-                    "CNN test RMSE population labels do not match the comparison: "
+                    "CNN test MAE population labels do not match the comparison: "
                     f"unexpected={unknown_test_populations}, "
                     f"missing={missing_test_populations}"
                 )
-            rmse_values = self.test_fraction_rmse.reindex(populations).to_numpy(dtype=float)
-            if np.any(~np.isfinite(rmse_values)) or np.any((rmse_values < 0) | (rmse_values > 1)):
-                raise ValueError("CNN test RMSE values must be finite and between 0 and 1")
-            cnn_test_rmse["CNN Mixer"] = rmse_values
+            mae_values = self.test_fraction_mae.reindex(populations).to_numpy(dtype=float)
+            if np.any(~np.isfinite(mae_values)) or np.any((mae_values < 0) | (mae_values > 1)):
+                raise ValueError("CNN test MAE values must be finite and between 0 and 1")
+            cnn_test_mae["CNN Mixer"] = mae_values
 
         def align_population_values(values, method):
             values = pd.Series(values, dtype=float)
@@ -1221,11 +1180,9 @@ class CnnMixer(object):
         return _plot_mixture_comparison(
             estimates=estimate_frame,
             intervals=intervals,
-            validation_errors=validation_errors,
-            holdout_rmse=holdout_rmse,
-            cnn_test_rmse=cnn_test_rmse,
-            classifier_cv_rmse=classifier_cv_rmse,
-            validation_label=validation_label,
+            holdout_mae=holdout_mae,
+            cnn_test_mae=cnn_test_mae,
+            classifier_cv_mae=classifier_cv_mae,
             output_folder=self.output_folder,
             save=save,
             filename=filename,
