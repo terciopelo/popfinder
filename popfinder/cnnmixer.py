@@ -825,6 +825,7 @@ class CnnMixer(object):
         save=True,
         filename="mixture_method_comparison.png",
         figsize=None,
+        validation_result=None,
     ):
         """Compare set-level fractions from all Popfinder mixture methods.
 
@@ -860,6 +861,11 @@ class CnnMixer(object):
             Output filename. The default is ``mixture_method_comparison.png``.
         figsize : tuple or None, optional
             Matplotlib figure size. Defaults to a width based on population count.
+        validation_result : dict or None, optional
+            Output from ``cross_validate_mixture_estimators()`` or
+            ``validate_mixture_estimators_on_holdout()``. Adds a lower panel
+            showing held-out fraction MAE for EM and average ancestry, with
+            one-standard-deviation error bars across folds or hold-out cohorts.
 
         Returns
         -------
@@ -930,6 +936,52 @@ class CnnMixer(object):
         }
         estimates = {}
         intervals = {}
+        validation_errors = {}
+        validation_label = None
+
+        if validation_result is not None:
+            if not isinstance(validation_result, dict):
+                raise TypeError("validation_result must be a mixture-validation result dict")
+            if isinstance(validation_result.get("fold_metrics"), pd.DataFrame):
+                validation_frame = validation_result["fold_metrics"]
+                validation_label = "Cross-validation"
+            elif isinstance(validation_result.get("results"), pd.DataFrame):
+                validation_frame = validation_result["results"]
+                validation_label = "Hold-out mixture validation"
+            else:
+                raise ValueError(
+                    "validation_result must come from cross_validate_mixture_estimators() "
+                    "or validate_mixture_estimators_on_holdout()"
+                )
+
+            validation_metrics = {
+                "EM": "em_fraction_mae",
+                "Average ancestry": "ancestry_mean_fraction_mae",
+            }
+            for method, column in validation_metrics.items():
+                if column not in validation_frame.columns:
+                    raise ValueError(
+                        f"validation_result is missing the '{column}' metric"
+                    )
+                metric_values = pd.to_numeric(
+                    validation_frame[column], errors="coerce"
+                ).dropna().to_numpy(dtype=float)
+                if metric_values.size == 0 or np.any(~np.isfinite(metric_values)):
+                    raise ValueError(
+                        f"validation_result has no finite values for '{column}'"
+                    )
+                if np.any((metric_values < 0) | (metric_values > 1)):
+                    raise ValueError(
+                        f"validation metric '{column}' must be between 0 and 1"
+                    )
+                metric_sd = (
+                    float(np.std(metric_values, ddof=1))
+                    if metric_values.size > 1 else 0.0
+                )
+                validation_errors[method] = (
+                    float(np.mean(metric_values)),
+                    metric_sd,
+                )
 
         def align_population_values(values, method):
             values = pd.Series(values, dtype=float)
@@ -1006,6 +1058,8 @@ class CnnMixer(object):
         return _plot_mixture_comparison(
             estimates=estimate_frame,
             intervals=intervals,
+            validation_errors=validation_errors,
+            validation_label=validation_label,
             output_folder=self.output_folder,
             save=save,
             filename=filename,
