@@ -192,9 +192,9 @@ class CnnMixer(object):
         return self.__unknown_props
 
     def train(self, valid_size=0.2, row_size=24, nreps=1, bootstraps=None,
-              patience=None, min_delta=0, learning_rate=1e-4, batch_size=32, 
+              patience=20, min_delta=1e-4, learning_rate=1e-4, batch_size=32,
               dropout_prop=0.2, hidden_size=16, hidden_layers=1, optimizer="Adam",
-              epochs=100, jobs=1, overwrite_results=False, num_workers=1,boot=False, boot_num =0,
+              epochs=200, jobs=1, overwrite_results=False, num_workers=1,boot=False, boot_num =0,
               optim_choice='Alpha',
               filters_per_branch=4,
               num_conv_branches=3,
@@ -214,11 +214,11 @@ class CnnMixer(object):
         bootstraps : int, optional
             Number of bootstraps to perform. The default is None.
         patience : int, optional
-            Number of epochs to wait before stopping training if validation loss   
-            does not decrease. The default is None.
+            Number of epochs to wait without improvement in validation MAE before
+            stopping training. The default is 20.
         min_delta : float, optional
-            Minimum change in validation loss to be considered an improvement.
-            The default is 0.
+            Minimum decrease in validation MAE to be considered an improvement.
+            The default is 1e-4.
         learning_rate : float, optional
             Learning rate for the neural network. The default is 0.001.
         batch_size : int, optional
@@ -242,7 +242,8 @@ class CnnMixer(object):
             Optimizer to use for training. Can be "Adam", "SGD", or "LGBFS". 
             The default is "Adam".
         epochs : int, optional
-            Number of epochs to train the neural network. The default is 100.
+            Maximum number of epochs to train the neural network. Training can
+            stop earlier when validation MAE does not improve. The default is 200.
         jobs : int, optional
             If greater than 1, will use multiprocessing to train the neural network. 
             The default is 1.

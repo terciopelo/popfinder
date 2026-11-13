@@ -288,7 +288,7 @@ class PopClassifier(object):
             best_model_path = os.path.join(self.output_folder, "best_model.pt")
             
             if os.path.exists(best_model_path):
-                self.__best_model = torch.load(os.path.join(self.output_folder, "best_model.pt"))
+                self.__best_model = torch.load(os.path.join(self.output_folder, "best_model.pt"), weights_only=False)
             
         else:
             best_model_folder, min_split = self.__find_best_model_folder_from_mp()
@@ -297,7 +297,7 @@ class PopClassifier(object):
                 best_model_path = os.path.join(best_model_folder, f"best_model_split{min_split}.pt")
 
                 if os.path.exists(best_model_path):
-                    self.__best_model = torch.load(os.path.join(best_model_folder, f"best_model_split{min_split}.pt"))
+                    self.__best_model = torch.load(os.path.join(best_model_folder, f"best_model_split{min_split}.pt"), weights_only=False)
                     torch.save(self.__best_model, os.path.join(self.output_folder, "best_model.pt"))
 
             self.__clean_mp_folders(nrep_begin, nreps, bootstraps)
@@ -1028,7 +1028,7 @@ class PopClassifier(object):
                             continue
 
                     folder = os.path.join(self.output_folder, f"rep{rep}_boot{boot}")
-                    model = torch.load(os.path.join(folder, f"best_model_split{split}.pt"))
+                    model = torch.load(os.path.join(folder, f"best_model_split{split}.pt"), weights_only=False)
                     y_pred = model(X_test).argmax(axis=1)
                     y_pred_pops = self.label_enc.inverse_transform(y_pred)
                     cv_test_results_temp = pd.DataFrame(
@@ -1082,7 +1082,7 @@ class PopClassifier(object):
             if ensemble_accuracy_threshold is not None and train_accuracy < ensemble_accuracy_threshold:
                 array[:, pos] = np.NaN 
             else:
-                model = torch.load(os.path.join(folder, f"best_model_split{split}.pt"))
+                model = torch.load(os.path.join(folder, f"best_model_split{split}.pt"), weights_only=False)
                 preds = model(X_unknown).argmax(axis=1)
                 array[:, pos] = preds
             pos += 1
