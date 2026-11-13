@@ -1177,6 +1177,7 @@ class CnnMixer(object):
                 intervals[method] = (lower, upper)
 
         estimate_frame = pd.DataFrame(estimates).T.reindex(columns=populations)
+        estimate_frame.loc["Average across methods"] = estimate_frame.mean(axis=0)
         return _plot_mixture_comparison(
             estimates=estimate_frame,
             intervals=intervals,
