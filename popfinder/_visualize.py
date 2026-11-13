@@ -117,3 +117,73 @@ def _plot_structure(preds, col_scheme, nn_type, output_folder, save):
         plt.savefig(os.path.join(output_folder,
             nn_type + "_structure.png"),
             bbox_inches="tight")
+
+
+def _plot_mixture_comparison(
+    estimates,
+    intervals,
+    output_folder,
+    save=True,
+    filename="mixture_method_comparison.png",
+    figsize=None,
+):
+    """Plot aligned population-fraction estimates from multiple methods."""
+    populations = list(estimates.columns)
+    methods = list(estimates.index)
+    if not methods or not populations:
+        raise ValueError("At least one method and one population are required")
+
+    if figsize is None:
+        figsize = (max(9, 1.5 * len(populations)), 6)
+    fig, ax = plt.subplots(figsize=figsize)
+    positions = np.arange(len(populations))
+    bar_width = 0.8 / len(methods)
+    offsets = (np.arange(len(methods)) - (len(methods) - 1) / 2) * bar_width
+    colors = sns.color_palette("colorblind", n_colors=len(methods))
+
+    for method_index, method in enumerate(methods):
+        values = estimates.loc[method, populations].to_numpy(dtype=float)
+        bar_positions = positions + offsets[method_index]
+        ax.bar(
+            bar_positions,
+            values,
+            width=bar_width,
+            label=method,
+            color=colors[method_index],
+        )
+
+        if method in intervals:
+            lower, upper = intervals[method]
+            lower_error = np.maximum(values - lower, 0)
+            upper_error = np.maximum(upper - values, 0)
+            ax.errorbar(
+                bar_positions,
+                values,
+                yerr=np.vstack([lower_error, upper_error]),
+                fmt="none",
+                ecolor="black",
+                elinewidth=1,
+                capsize=3,
+            )
+
+    ax.set_xticks(positions)
+    ax.set_xticklabels(populations, rotation=30, ha="right")
+    ax.set_ylim(0, 1)
+    ax.set_ylabel("Estimated mixture fraction")
+    ax.set_xlabel("Population")
+    if intervals:
+        ax.set_title(
+            "Population mixture estimates by method\n"
+            "Error bars show Bayesian 95% credible intervals"
+        )
+    else:
+        ax.set_title("Population mixture estimates by method")
+    ax.legend(title="Method", bbox_to_anchor=(1.02, 1), loc="upper left")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+
+    if save:
+        os.makedirs(output_folder, exist_ok=True)
+        fig.savefig(os.path.join(output_folder, filename), bbox_inches="tight")
+
+    return fig

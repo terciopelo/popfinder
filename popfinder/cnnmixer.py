@@ -20,6 +20,7 @@ from popfinder._helper import *
 from popfinder._visualize import _plot_assignment
 from popfinder._visualize import _plot_confusion_matrix
 from popfinder._visualize import _plot_structure
+from popfinder._visualize import _plot_mixture_comparison
 from popfinder._helper import _save, _load
 from popfinder._mixture_estimators import (
     estimate_average_ancestry as _estimate_average_ancestry,
@@ -811,6 +812,205 @@ class CnnMixer(object):
     
     def plot_mix(self):
         plot_pop_fractions(self.__unknown_props,self.__pop_series)
+
+    def plot_mixture_comparison(
+        self,
+        classifier=None,
+        em_result=None,
+        ancestry_result=None,
+        bayesian_result=None,
+        cnn_result=None,
+        classifier_result=None,
+        classifier_use_best_model=True,
+        save=True,
+        filename="mixture_method_comparison.png",
+        figsize=None,
+    ):
+        """Compare set-level fractions from all Popfinder mixture methods.
+
+        Missing EM, average-ancestry, Bayesian MCMC, and CNN Mixer results are
+        computed from this mixer's reference and unknown samples. Supply a
+        fitted ``PopClassifier`` through ``classifier`` (or its assignment
+        summary through ``classifier_result``) to include the classifier NN.
+        The classifier's per-sample assignment frequencies are averaged across
+        the unknown set. Bayesian credible intervals are shown when its result
+        includes the posterior summary.
+
+        Parameters
+        ----------
+        classifier : PopClassifier or None, optional
+            Trained classifier object. If it has not assigned unknown samples
+            yet, ``assign_unknown()`` is run with ``save=False``.
+        em_result, ancestry_result, bayesian_result : optional
+            Precomputed outputs from the corresponding mixture methods. If
+            omitted, this mixer computes them using its current known and unknown
+            data. Pass these to customize estimator settings.
+        cnn_result : optional
+            Precomputed CNN Mixer subset predictions. If omitted, use
+            ``unknown_props`` or run ``assign_unknown()``.
+        classifier_result : pandas.DataFrame or None, optional
+            Precomputed result from ``classifier.get_assignment_summary()``.
+            Use this when passing an object is inconvenient.
+        classifier_use_best_model : bool, optional
+            Assignment mode used if the classifier has not run
+            ``assign_unknown()``. The default is True.
+        save : bool, optional
+            Save the figure in this mixer's output folder. The default is True.
+        filename : str, optional
+            Output filename. The default is ``mixture_method_comparison.png``.
+        figsize : tuple or None, optional
+            Matplotlib figure size. Defaults to a width based on population count.
+
+        Returns
+        -------
+        matplotlib.figure.Figure
+            Grouped bar chart with one group per population.
+        """
+        if classifier_result is None and classifier is None:
+            raise ValueError(
+                "Pass a PopClassifier through classifier or provide "
+                "classifier_result to include the classifier NN."
+            )
+
+        populations = list(self.label_enc.classes_)
+        reference_populations = pd.unique(self.data.knowns["pop"]).tolist()
+        populations.extend(
+            population for population in reference_populations
+            if population not in populations
+        )
+
+        if em_result is None:
+            em_result = self.estimate_mixture_proportions_em()
+        if ancestry_result is None:
+            ancestry_result = self.estimate_average_ancestry()
+        if bayesian_result is None:
+            bayesian_result = self.estimate_mixture_proportions_bayesian()
+        if cnn_result is None:
+            if self.unknown_props is None:
+                cnn_result = self.assign_unknown(save=False)
+            else:
+                cnn_result = self.unknown_props
+
+        if classifier_result is None:
+            classifier_data = getattr(classifier, "data", None)
+            if classifier_data is not None:
+                classifier_unknowns = getattr(classifier_data, "unknowns", None)
+                if classifier_unknowns is not None and "sampleID" in classifier_unknowns:
+                    expected_ids = set(self.data.unknowns["sampleID"].astype(str))
+                    classifier_ids = set(classifier_unknowns["sampleID"].astype(str))
+                    if expected_ids != classifier_ids:
+                        raise ValueError(
+                            "The classifier and CnnMixer must use the same unknown samples"
+                        )
+
+            if getattr(classifier, "classification", None) is None:
+                classifier.assign_unknown(
+                    use_best_model=classifier_use_best_model,
+                    save=False,
+                )
+            classifier_result = classifier.get_assignment_summary(save=False)
+        elif (
+            isinstance(classifier_result, pd.DataFrame)
+            and classifier_result.index.name == "sampleID"
+        ):
+            expected_ids = set(self.data.unknowns["sampleID"].astype(str))
+            result_ids = set(classifier_result.index.astype(str))
+            if expected_ids != result_ids:
+                raise ValueError(
+                    "classifier_result must contain assignments for the same "
+                    "unknown samples as this CnnMixer"
+                )
+
+        method_results = {
+            "EM": em_result,
+            "Average ancestry": ancestry_result,
+            "Bayesian MCMC": bayesian_result,
+            "CNN Mixer": cnn_result,
+            "Popfinder classifier": classifier_result,
+        }
+        estimates = {}
+        intervals = {}
+
+        def align_population_values(values, method):
+            values = pd.Series(values, dtype=float)
+            unknown_populations = [
+                population for population in values.index
+                if population not in populations
+            ]
+            if unknown_populations:
+                raise ValueError(
+                    f"{method} returned populations not in the reference set: "
+                    f"{unknown_populations}"
+                )
+            values = values.reindex(populations, fill_value=0.0)
+            array = values.to_numpy(dtype=float)
+            if np.any(~np.isfinite(array)) or np.any((array < -1e-8) | (array > 1 + 1e-8)):
+                raise ValueError(f"{method} returned invalid population fractions")
+            total = array.sum()
+            if total <= 0 or not np.isclose(total, 1.0, atol=0.02):
+                raise ValueError(
+                    f"{method} fractions must sum to 1 (received {total:.4f})"
+                )
+            return pd.Series(np.clip(array, 0, 1) / total, index=populations)
+
+        for method, result in method_results.items():
+            lower = upper = None
+            if isinstance(result, tuple):
+                result = result[0]
+
+            if isinstance(result, dict):
+                posterior_summary = result.get("proportion_summary")
+                if isinstance(posterior_summary, pd.DataFrame) and "posterior_mean" in posterior_summary:
+                    values = posterior_summary["posterior_mean"]
+                    if {"credible_interval_2.5%", "credible_interval_97.5%"}.issubset(
+                        posterior_summary.columns
+                    ):
+                        lower = posterior_summary["credible_interval_2.5%"]
+                        upper = posterior_summary["credible_interval_97.5%"]
+                else:
+                    values = result.get("mixture_proportions")
+                if values is None:
+                    raise ValueError(f"Could not read mixture estimates for {method}")
+            elif isinstance(result, pd.DataFrame):
+                if "posterior_mean" in result.columns:
+                    values = result["posterior_mean"]
+                else:
+                    unknown_populations = [
+                        population for population in result.columns
+                        if population not in populations
+                    ]
+                    if unknown_populations:
+                        raise ValueError(
+                            f"{method} returned populations not in the reference set: "
+                            f"{unknown_populations}"
+                        )
+                    values = result.reindex(columns=populations, fill_value=0).mean(axis=0)
+            elif isinstance(result, pd.Series):
+                values = result
+            else:
+                draws = np.asarray(result, dtype=float)
+                if draws.size == 0 or draws.size % len(populations) != 0:
+                    raise ValueError(
+                        f"Could not reshape the {method} output to population vectors"
+                    )
+                draws = draws.reshape(-1, len(populations))
+                values = pd.Series(draws.mean(axis=0), index=populations)
+
+            estimates[method] = align_population_values(values, method)
+            if lower is not None and upper is not None:
+                lower = pd.Series(lower).reindex(populations, fill_value=0).to_numpy(dtype=float)
+                upper = pd.Series(upper).reindex(populations, fill_value=0).to_numpy(dtype=float)
+                intervals[method] = (lower, upper)
+
+        estimate_frame = pd.DataFrame(estimates).T.reindex(columns=populations)
+        return _plot_mixture_comparison(
+            estimates=estimate_frame,
+            intervals=intervals,
+            output_folder=self.output_folder,
+            save=save,
+            filename=filename,
+            figsize=figsize,
+        )
         
     def __get_assignment_frequency(self, assign_array):
 
