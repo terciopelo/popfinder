@@ -71,6 +71,7 @@ class CnnMixer(object):
         self.__model = None
         self.__loss_fn = None
         self.__test_mae = None
+        self.__test_fraction_rmse = None
         self.__unknown_props = None
         self.__pop_series = data.train["pop"].astype('category').cat.categories
         self.__criterion = None
@@ -182,6 +183,11 @@ class CnnMixer(object):
     @property
     def test_log(self):
         return self.__test_log
+
+    @property
+    def test_fraction_rmse(self):
+        """Per-population RMSE measured by ``test()`` on synthetic hold-out mixtures."""
+        return self.__test_fraction_rmse
         
     @property
     def model(self):
@@ -273,6 +279,7 @@ class CnnMixer(object):
                                     learning_rate, batch_size, dropout_prop,
                                     filters_per_branch, num_conv_branches,
                                     weight_decay)
+        self.__test_fraction_rmse = None
                                     
         # since row size is needed for testing as well, update the object's global
         self.__row_size = row_size
@@ -399,7 +406,7 @@ class CnnMixer(object):
 
     def test(self, use_best_model=True, ensemble_accuracy_threshold=0.5, save=True, boot=False):
         """
-        Tests the classification neural network.
+        Evaluates the mixture regressor on synthetic mixtures from the test split.
 
         Parameters
         ----------
@@ -413,6 +420,10 @@ class CnnMixer(object):
         Returns
         -------
         None.
+
+        Notes
+        -----
+        Per-population RMSE is stored in ``test_fraction_rmse`` for plotting.
         """
         
         # build testing data set / loader
@@ -427,7 +438,31 @@ class CnnMixer(object):
         #loss_fn = self.__loss_fn
         criterion = self.__criterion
         # run test loop
-        correct_tl, loss_tl, rsq_tl, rmse_tl, mae_tl, alpha_tl = test_loop(test_loader,model, criterion, mode="test")
+        (
+            correct_tl,
+            loss_tl,
+            rsq_tl,
+            rmse_tl,
+            mae_tl,
+            alpha_tl,
+            predictions,
+            targets,
+        ) = test_loop(
+            test_loader,
+            model,
+            criterion,
+            mode="test",
+            return_predictions=True,
+        )
+        if predictions.shape[1] != len(self.label_enc.classes_):
+            raise ValueError(
+                "The CNN test outputs do not match the mixer's population labels"
+            )
+        self.__test_fraction_rmse = pd.Series(
+            np.sqrt(np.mean((predictions - targets) ** 2, axis=0)),
+            index=self.label_enc.classes_,
+            name="test_rmse",
+        )
         
         if boot:
             self.__test_log = pd.concat([self.__test_log, {"test_correst": [correct_tl],
@@ -827,6 +862,7 @@ class CnnMixer(object):
         filename="mixture_method_comparison.png",
         figsize=None,
         validation_result=None,
+        classifier_cv_validation=None,
     ):
         """Compare set-level fractions from all Popfinder mixture methods.
 
@@ -836,7 +872,10 @@ class CnnMixer(object):
         summary through ``classifier_result``) to include the classifier NN.
         The classifier's per-sample assignment frequencies are averaged across
         the unknown set. Bayesian credible intervals are shown when its result
-        includes the posterior summary.
+        includes the posterior summary. If ``test()`` has been run, per-population
+        CNN test RMSE is also drawn on the CNN Mixer bars. If it has not been run
+        and this mixer has a trained model, the comparison runs ``test(save=False)``
+        to calculate those error bars.
 
         Parameters
         ----------
@@ -849,10 +888,15 @@ class CnnMixer(object):
             data. Pass these to customize estimator settings.
         cnn_result : optional
             Precomputed CNN Mixer subset predictions. If omitted, use
-            ``unknown_props`` or run ``assign_unknown()``.
+            ``unknown_props`` or run ``assign_unknown()``. CNN test RMSE error bars
+            are available after calling ``test()``.
         classifier_result : pandas.DataFrame or None, optional
             Precomputed result from ``classifier.get_assignment_summary()``.
             Use this when passing an object is inconvenient.
+        classifier_cv_validation : pandas.DataFrame or None, optional
+            Out-of-fold predictions from ``classifier.cv_validation_predictions``.
+            If omitted, the plot reads them from ``classifier`` when available.
+            These must come from training with ``cv_splits > 1``.
         classifier_use_best_model : bool, optional
             Assignment mode used if the classifier has not run
             ``assign_unknown()``. The default is True.
@@ -867,6 +911,8 @@ class CnnMixer(object):
             ``validate_mixture_estimators_on_holdout()``. Adds a lower panel
             showing held-out fraction MAE for EM and average ancestry, with
             one-standard-deviation error bars across folds or hold-out cohorts.
+            Hold-out results also add population-specific RMSE error bars to the
+            EM and average-ancestry fraction estimates.
 
         Returns
         -------
@@ -928,6 +974,63 @@ class CnnMixer(object):
                     "unknown samples as this CnnMixer"
                 )
 
+        if classifier_cv_validation is None and classifier is not None:
+            classifier_cv_validation = getattr(
+                classifier, "cv_validation_predictions", None
+            )
+        classifier_cv_rmse = {}
+        if classifier_cv_validation is not None:
+            if not isinstance(classifier_cv_validation, pd.DataFrame):
+                raise TypeError("classifier_cv_validation must be a pandas DataFrame")
+            required_cv_columns = {"true_pop", "pred_pop", "split"}
+            if not required_cv_columns.issubset(classifier_cv_validation.columns):
+                missing_columns = required_cv_columns.difference(
+                    classifier_cv_validation.columns
+                )
+                raise ValueError(
+                    "classifier_cv_validation is missing columns: "
+                    f"{sorted(missing_columns)}"
+                )
+            extra_cv_populations = [
+                population for population in pd.unique(
+                    pd.concat([
+                        classifier_cv_validation["true_pop"],
+                        classifier_cv_validation["pred_pop"],
+                    ], ignore_index=True)
+                )
+                if population not in populations
+            ]
+            if extra_cv_populations:
+                raise ValueError(
+                    "Classifier CV predictions contain populations outside the "
+                    f"reference set: {extra_cv_populations}"
+                )
+
+            fold_columns = [
+                column for column in ("rep", "bootstrap", "fold_repeat", "split")
+                if column in classifier_cv_validation.columns
+            ]
+            fold_fraction_errors = []
+            for _, fold in classifier_cv_validation.groupby(
+                fold_columns, sort=False, dropna=False
+            ):
+                true_fractions = (
+                    fold["true_pop"].value_counts(normalize=True)
+                    .reindex(populations, fill_value=0)
+                    .to_numpy(dtype=float)
+                )
+                predicted_fractions = (
+                    fold["pred_pop"].value_counts(normalize=True)
+                    .reindex(populations, fill_value=0)
+                    .to_numpy(dtype=float)
+                )
+                fold_fraction_errors.append(predicted_fractions - true_fractions)
+            if not fold_fraction_errors:
+                raise ValueError("classifier_cv_validation contains no validation folds")
+            classifier_cv_rmse["Popfinder classifier"] = np.sqrt(
+                np.mean(np.square(np.stack(fold_fraction_errors)), axis=0)
+            )
+
         method_results = {
             "EM": em_result,
             "Average ancestry": ancestry_result,
@@ -938,6 +1041,8 @@ class CnnMixer(object):
         estimates = {}
         intervals = {}
         validation_errors = {}
+        holdout_rmse = {}
+        cnn_test_rmse = {}
         validation_label = None
 
         if validation_result is not None:
@@ -983,6 +1088,63 @@ class CnnMixer(object):
                     float(np.mean(metric_values)),
                     metric_sd,
                 )
+
+            if validation_label == "Hold-out mixture validation":
+                for method, estimate_prefix in (
+                    ("EM", "em_estimate_"),
+                    ("Average ancestry", "ancestry_estimate_"),
+                ):
+                    population_rmse = []
+                    for population in populations:
+                        estimate_column = f"{estimate_prefix}{population}"
+                        truth_column = f"true_fraction_{population}"
+                        if (
+                            estimate_column not in validation_frame.columns
+                            or truth_column not in validation_frame.columns
+                        ):
+                            raise ValueError(
+                                "Hold-out validation results must include per-population "
+                                f"estimates and true fractions for {population!r}"
+                            )
+                        estimate_values = pd.to_numeric(
+                            validation_frame[estimate_column], errors="coerce"
+                        ).to_numpy(dtype=float)
+                        truth_values = pd.to_numeric(
+                            validation_frame[truth_column], errors="coerce"
+                        ).to_numpy(dtype=float)
+                        valid_rows = np.isfinite(estimate_values) & np.isfinite(truth_values)
+                        if not np.any(valid_rows):
+                            raise ValueError(
+                                f"Hold-out validation has no finite errors for {population!r}"
+                            )
+                        residuals = estimate_values[valid_rows] - truth_values[valid_rows]
+                        population_rmse.append(
+                            float(np.sqrt(np.mean(residuals ** 2)))
+                        )
+                    holdout_rmse[method] = np.asarray(population_rmse, dtype=float)
+
+        if self.test_fraction_rmse is None and self.model is not None:
+            self.test(save=False)
+
+        if self.test_fraction_rmse is not None:
+            unknown_test_populations = [
+                population for population in self.test_fraction_rmse.index
+                if population not in populations
+            ]
+            missing_test_populations = [
+                population for population in populations
+                if population not in self.test_fraction_rmse.index
+            ]
+            if unknown_test_populations or missing_test_populations:
+                raise ValueError(
+                    "CNN test RMSE population labels do not match the comparison: "
+                    f"unexpected={unknown_test_populations}, "
+                    f"missing={missing_test_populations}"
+                )
+            rmse_values = self.test_fraction_rmse.reindex(populations).to_numpy(dtype=float)
+            if np.any(~np.isfinite(rmse_values)) or np.any((rmse_values < 0) | (rmse_values > 1)):
+                raise ValueError("CNN test RMSE values must be finite and between 0 and 1")
+            cnn_test_rmse["CNN Mixer"] = rmse_values
 
         def align_population_values(values, method):
             values = pd.Series(values, dtype=float)
@@ -1060,6 +1222,9 @@ class CnnMixer(object):
             estimates=estimate_frame,
             intervals=intervals,
             validation_errors=validation_errors,
+            holdout_rmse=holdout_rmse,
+            cnn_test_rmse=cnn_test_rmse,
+            classifier_cv_rmse=classifier_cv_rmse,
             validation_label=validation_label,
             output_folder=self.output_folder,
             save=save,

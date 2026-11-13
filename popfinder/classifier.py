@@ -50,6 +50,7 @@ class PopClassifier(object):
         self.__f1 = None
         self.__mcc = None
         self.__confusion_matrix = None
+        self.__cv_validation_predictions = None
         self.__nn_type = "classifier"
         self.__mp_run = False
         self.__lowest_val_loss_total = 9999
@@ -83,6 +84,11 @@ class PopClassifier(object):
     @property
     def train_history(self):
         return self.__train_history
+
+    @property
+    def cv_validation_predictions(self):
+        """Out-of-fold labels and predictions collected during k-fold training."""
+        return self.__cv_validation_predictions
 
     @property
     def best_model(self):
@@ -192,6 +198,11 @@ class PopClassifier(object):
         Returns
         -------
         None.
+
+        Notes
+        -----
+        When ``cv_splits > 1``, out-of-fold sample predictions are retained in
+        ``cv_validation_predictions`` for validation-based mixture summaries.
         """
         self._validate_train_inputs(epochs, valid_size, cv_splits, nreps,
                                     learning_rate, batch_size, dropout_prop)
@@ -212,6 +223,10 @@ class PopClassifier(object):
 
         # Create optimizer
         self.__store_optimizer_params(optimizer, learning_rate, hyperparams)
+        self.__cv_validation_predictions = None
+        self.__classification = None
+        self.__freq_assign = None
+        cv_prediction_frames = []
 
         multi_output = (bootstraps is not None) or (nreps is not None)
 
@@ -247,6 +262,15 @@ class PopClassifier(object):
                             hidden_layers=hidden_layers, 
                             result_folder=boot_folder, patience=patience, 
                             min_delta=min_delta, overwrite_results=overwrite_results)
+
+                        if (
+                            self.__cv_validation_predictions is not None
+                            and not self.__cv_validation_predictions.empty
+                        ):
+                            fold_predictions = self.__cv_validation_predictions.copy()
+                            fold_predictions["rep"] = j + 1
+                            fold_predictions["bootstrap"] = i + 1
+                            cv_prediction_frames.append(fold_predictions)
                         
                         boot_loss_df.to_csv(os.path.join(boot_folder, "loss.csv"), index=False)
                         boot_loss_df["rep"] = j + 1
@@ -276,6 +300,34 @@ class PopClassifier(object):
                     "--epochs", str(epochs), "--jobs", str(jobs)])
                 
                 loss_df = pd.read_csv(os.path.join(tempfolder, "train_history.csv"))
+
+                if cv_splits > 1:
+                    for rep in range(nrep_begin, nreps):
+                        for bootstrap in range(bootstraps):
+                            cv_path = os.path.join(
+                                tempfolder,
+                                f"rep{rep + 1}_boot{bootstrap + 1}",
+                                "cv_validation_predictions.csv",
+                            )
+                            if os.path.exists(cv_path):
+                                fold_predictions = pd.read_csv(cv_path)
+                                label_lookup = {
+                                    str(population): population
+                                    for population in self.label_enc.classes_
+                                }
+                                for population_column in ("true_pop", "pred_pop"):
+                                    fold_predictions[population_column] = (
+                                        fold_predictions[population_column]
+                                        .map(lambda value: label_lookup.get(str(value), value))
+                                    )
+                                fold_predictions["rep"] = rep + 1
+                                fold_predictions["bootstrap"] = bootstrap + 1
+                                cv_prediction_frames.append(fold_predictions)
+
+        if cv_prediction_frames:
+            self.__cv_validation_predictions = pd.concat(
+                cv_prediction_frames, ignore_index=True
+            )
 
         # Save training history
         if self.__train_history is None:
@@ -849,6 +901,7 @@ class PopClassifier(object):
         loss_dict = {"split": [], "epoch": [], "train_loss": [], "valid_loss": [],
                      "valid_accuracy": [], "valid_precision": [], "valid_recall": [],
                      "valid_f1": [], "valid_mcc": []}
+        cv_prediction_frames = []
 
         for i, input in enumerate(inputs):
 
@@ -856,6 +909,7 @@ class PopClassifier(object):
             split = i % cv_splits + 1
 
             X_train, y_train, X_valid, y_valid = _split_input_classifier(self, input)
+            valid_input = input[1]
             train_loader, valid_loader = _generate_data_loaders(X_train, y_train,
                                                                 X_valid, y_valid)
 
@@ -920,7 +974,45 @@ class PopClassifier(object):
                 loss_dict["valid_f1"].append(f1)
                 loss_dict["valid_mcc"].append(mcc)
 
+            if cv_splits > 1:
+                best_model_path = os.path.join(
+                    result_folder, f"best_model_split{split}.pt"
+                )
+                if not os.path.exists(best_model_path):
+                    raise RuntimeError(
+                        f"No best model was saved for validation fold {split}"
+                    )
+                best_model = torch.load(best_model_path, weights_only=False)
+                best_model.eval()
+                with torch.no_grad():
+                    validation_logits = best_model(X_valid)
+                predicted_indices = validation_logits.argmax(dim=1).cpu().numpy()
+                predicted_populations = self.label_enc.inverse_transform(
+                    predicted_indices
+                )
+                sample_ids = (
+                    valid_input["sampleID"].to_numpy()
+                    if "sampleID" in valid_input.columns
+                    else valid_input.index.to_numpy()
+                )
+                cv_prediction_frames.append(pd.DataFrame({
+                    "sampleID": sample_ids,
+                    "true_pop": valid_input["pop"].to_numpy(),
+                    "pred_pop": predicted_populations,
+                    "fold_repeat": i // cv_splits + 1,
+                    "split": split,
+                }))
 
+        if cv_prediction_frames:
+            self.__cv_validation_predictions = pd.concat(
+                cv_prediction_frames, ignore_index=True
+            )
+            self.__cv_validation_predictions.to_csv(
+                os.path.join(result_folder, "cv_validation_predictions.csv"),
+                index=False,
+            )
+        else:
+            self.__cv_validation_predictions = None
         return pd.DataFrame(loss_dict)
     
     def __store_optimizer_params(self, optimizer, learning_rate, hyperparams):

@@ -123,6 +123,9 @@ def _plot_mixture_comparison(
     estimates,
     intervals,
     validation_errors,
+    holdout_rmse,
+    cnn_test_rmse,
+    classifier_cv_rmse,
     validation_label,
     output_folder,
     save=True,
@@ -176,15 +179,82 @@ def _plot_mixture_comparison(
                 capsize=3,
             )
 
+        if method in holdout_rmse:
+            rmse = holdout_rmse[method]
+            ax.errorbar(
+                bar_positions,
+                values,
+                yerr=np.vstack([
+                    np.minimum(values, rmse),
+                    np.minimum(1 - values, rmse),
+                ]),
+                fmt="none",
+                ecolor=colors[method_index],
+                elinewidth=1.5,
+                capsize=3,
+            )
+
+        if method in cnn_test_rmse:
+            rmse = cnn_test_rmse[method]
+            ax.errorbar(
+                bar_positions,
+                values,
+                yerr=np.vstack([
+                    np.minimum(values, rmse),
+                    np.minimum(1 - values, rmse),
+                ]),
+                fmt="none",
+                ecolor=colors[method_index],
+                elinewidth=1.5,
+                capsize=3,
+            )
+
+        if method in classifier_cv_rmse:
+            rmse = classifier_cv_rmse[method]
+            ax.errorbar(
+                bar_positions,
+                values,
+                yerr=np.vstack([
+                    np.minimum(values, rmse),
+                    np.minimum(1 - values, rmse),
+                ]),
+                fmt="none",
+                ecolor=colors[method_index],
+                elinewidth=1.5,
+                capsize=3,
+            )
+
     ax.set_xticks(positions)
     ax.set_xticklabels(populations, rotation=30, ha="right")
     ax.set_ylim(0, 1)
     ax.set_ylabel("Estimated mixture fraction")
     ax.set_xlabel("Population")
-    if intervals:
+    empirical_error_sources = []
+    if holdout_rmse:
+        empirical_error_sources.append("mixture hold-out RMSE")
+    if cnn_test_rmse:
+        empirical_error_sources.append("CNN test RMSE")
+    if classifier_cv_rmse:
+        empirical_error_sources.append("Popfinder k-fold RMSE")
+
+    if intervals and empirical_error_sources:
+        ax.set_title(
+            "Population mixture estimates by method\n"
+            "Black: Bayesian 95% credible intervals; colored: "
+            + " and ".join(empirical_error_sources)
+            + " (RMSE bars are not confidence intervals)"
+        )
+    elif intervals:
         ax.set_title(
             "Population mixture estimates by method\n"
             "Error bars show Bayesian 95% credible intervals"
+        )
+    elif empirical_error_sources:
+        ax.set_title(
+            "Population mixture estimates by method\n"
+            "Colored error bars show "
+            + " and ".join(empirical_error_sources)
+            + " (not confidence intervals)"
         )
     else:
         ax.set_title("Population mixture estimates by method")

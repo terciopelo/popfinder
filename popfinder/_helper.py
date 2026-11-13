@@ -311,7 +311,7 @@ def train_loop(dataloader, model, criterion, optimizer, batch_size):
             print(f"alpha: {alpha_loc}\n")
     return torch.tensor(epoch_loss / seen, device=device)
 
-def test_loop(dataloader, model, criterion, mode="train"):
+def test_loop(dataloader, model, criterion, mode="train", return_predictions=False):
     model.eval()
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     test_loss, mae, kld_loss, alpha_avg = 0, 0, 0, 0
@@ -353,7 +353,10 @@ def test_loop(dataloader, model, criterion, mode="train"):
       print(f"MAE: {round(mae,3)}")
       print(f"KLDIV: {round(kld_loss,3)}")
       #print(f"alpha: {alpha_avg}\n")
-    return correct, test_loss, rsq, rmse, mae, kld_loss
+    metrics = (correct, test_loss, rsq, rmse, mae, kld_loss)
+    if return_predictions:
+        return (*metrics, all_predictions.numpy(), all_targets.numpy())
+    return metrics
 
 def get_unknown_mixture(dataset, model, loss_fn, row_size, iterations=100):
     # add number of sampling runs as a set-able param?

@@ -17,6 +17,14 @@ def _train_on_bootstraps(clf_object, train_args):
 
     # Return losses
     clf_object.train_history.to_csv(os.path.join(clf_object.output_folder, "loss.csv"), index=False)
+    if clf_object.cv_validation_predictions is not None:
+        clf_object.cv_validation_predictions.to_csv(
+            os.path.join(
+                clf_object.output_folder,
+                "cv_validation_predictions.csv",
+            ),
+            index=False,
+        )
     return clf_object.train_history
 
 def create_classifier_objects(rep_start, nreps, nboots, popfinder_path):
@@ -114,4 +122,4 @@ if __name__ == "__main__":
             results[ind]["bootstrap"] = boot + 1
     
     final_results = pd.concat(results, ignore_index=True)
-    final_results.to_csv(os.path.join(popfinder_path, "train_history.csv"), index=False)    
+    final_results.to_csv(os.path.join(popfinder_path, "train_history.csv"), index=False)
